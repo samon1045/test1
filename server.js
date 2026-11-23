@@ -7,19 +7,10 @@ const path = require("path");
 
 const { runPosts } = require("./post");
 const { runComments } = require("./comment");
+const { sleep, cleanupDir } = require("./utils");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
-  next();
-});
 
 app.use(
   cors({
@@ -28,9 +19,8 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization"]
   })
 );
+app.options("*", cors());
 app.use(express.json({ limit: "2mb" }));
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function normalizeCookies(rawCookie, targetUrl = "https://padlet.com") {
   if (!rawCookie) return [];
@@ -101,28 +91,30 @@ function normalizeCookies(rawCookie, targetUrl = "https://padlet.com") {
   return [];
 }
 
-function cleanupDir(dirPath) {
-  if (!dirPath || !fs.existsSync(dirPath)) return;
-  try {
-    fs.rmSync(dirPath, { recursive: true, force: true });
-  } catch (_) {}
-}
-
 async function waitForBoardReady(page, timeoutMs = 25000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const ready = await page.evaluate(() => {
+      const bodyLen = (document.body?.innerText || "").trim().length;
+      if (bodyLen === 0) return false;
+
       const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
-      return btns.some((b) => {
+      const hasActionBtn = btns.some((b) => {
         const r = b.getBoundingClientRect();
         const t = (b.innerText || "").trim();
         const a = (b.getAttribute("aria-label") || "").toLowerCase();
         return (
           r.width > 0 &&
           r.height > 0 &&
-          (t === "+" || t.includes("投稿") || a.includes("add") || a.includes("post"))
+          (t === "+" ||
+            t.includes("投稿") ||
+            a.includes("add") ||
+            a.includes("post") ||
+            a.includes("comment"))
         );
       });
+
+      return hasActionBtn || bodyLen > 120;
     });
     if (ready) {
       await sleep(1500);
@@ -159,7 +151,7 @@ app.post("/run", async (req, res) => {
     enableVideo = true
   } = req.body || {};
 
-  const trimmedUrl = roomUrl.trim();
+  const trimmedUrl = String(roomUrl || "").trim();
   if (!trimmedUrl) {
     return res.status(400).json({ ok: false, error: "roomUrl が指定されていません。" });
   }
