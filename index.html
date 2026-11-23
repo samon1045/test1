@@ -80,7 +80,7 @@
   </div>
 
   <script>
-    const STORAGE_KEY = "samon_ps_padlet_state_v9";
+    const STORAGE_KEY = "samon_ps_padlet_state_v10";
     const RENDER_BASE_URL = "https://test1-1-qyfl.onrender.com/";
 
     const outputEl = document.getElementById("output");
@@ -92,10 +92,6 @@
     const defaultState = {
       apiUrl: RENDER_BASE_URL,
       roomUrl: "",
-      titleMessage: "お知らせ",
-      message: "メッセージ",
-      commentMessage: "",
-      gifFile: "_______.gif",
       cookie: "",
       repeat: 2,
       commentRepeat: 1,
@@ -266,7 +262,7 @@
       }
       stopRequested = true;
       const endpoint = (state.apiUrl || RENDER_BASE_URL).replace(/\/+$/, "") + "/stop";
-      appendLine("中断リクエストを送信しました（現在の待機・ステップ完了後に停止します）...", "yellow");
+      appendLine("中断リクエストを送信しました...", "yellow");
 
       try {
         await fetch(endpoint, {
@@ -296,7 +292,7 @@
       }
 
       if (!state.enablePost && !state.enableComment) {
-        appendLine("エラー: 投稿とコメントが両方 OFF です。set-post on または set-comment on を設定してください。", "yellow");
+        appendLine("エラー: 投稿とコメントが両方 OFF です。", "yellow");
         appendLine("");
         return;
       }
@@ -312,19 +308,9 @@
 
       const startedAt = Date.now();
       appendLine("Render サーバーへリクエストを送信中...", "cyan");
-      appendLine("Job ID         : " + currentJobId, "gray");
-      appendLine("Endpoint       : " + endpoint, "gray");
       appendLine("Room URL       : " + state.roomUrl, "gray");
-      appendLine("Title          : " + (state.titleMessage || "お知らせ"), "gray");
-      appendLine("Message        : " + (state.message || "メッセージ"), "gray");
-      appendLine("Image / GIF    : " + (state.gifFile || "_______.gif"), "gray");
-      if (state.enableComment) {
-        appendLine("Comment Msg    : " + (state.commentMessage || state.message || "メッセージ"), "gray");
-        appendLine("Comment Repeat : " + state.commentRepeat + " 回/投稿", "gray");
-      }
-      if (state.enablePost) {
-        appendLine("Rounds         : " + state.repeat + " ラウンド", "gray");
-      }
+      appendLine("Rounds         : " + state.repeat + " ラウンド", "gray");
+      appendLine("Comment Repeat : " + state.commentRepeat + " 回", "gray");
       appendLine("");
 
       const progressLine = appendLine("  [待機中] Playwright 実行中... (0秒経過)", "gray");
@@ -348,10 +334,6 @@
           body: JSON.stringify({
             jobId: currentJobId,
             roomUrl: state.roomUrl,
-            titleMessage: state.titleMessage,
-            message: state.message,
-            commentMessage: state.commentMessage,
-            gifFile: state.gifFile,
             cookie: state.cookie,
             repeat: state.repeat,
             commentRepeat: state.commentRepeat,
@@ -394,8 +376,6 @@
               isOk ? "green" : "yellow"
             );
           }
-        } else {
-          appendLine("  (サーバーからの詳細ログ配列は空です)", "gray");
         }
 
         if (data.videoBase64) {
@@ -497,15 +477,11 @@
         appendLine("  set-rec <on|off>       録画保存の有効/無効（既定: on）");
         appendLine("  set-api <URL>          Renderエンドポイントを設定");
         appendLine("  set-url <URL>          対象ボードのURLを設定");
-        appendLine("  set-title <TEXT>       決められた投稿タイトルを設定");
-        appendLine("  set-msg <TEXT>         決められた投稿メッセージを設定");
-        appendLine("  set-cmsg <TEXT>        決められたコメントメッセージを設定");
-        appendLine("  set-gif <FILENAME>     使用する画像/GIFファイル名を設定（既定: _______.gif）");
         appendLine("  set-crepeat <NUM>      1投稿あたりのコメント回数（1〜10）");
         appendLine("  set-cookie <VALUE>     Cookie（JSON配列または key=val）を設定");
         appendLine("  clear-cookie           保存済みCookieを削除");
         appendLine("  set-repeat <NUM>       ラウンド数（1〜10、既定: 2）");
-        appendLine("  run                    設定内容で実行");
+        appendLine("  run                    実行");
         appendLine("  stop                   実行中の処理を途中で停止（Escキーでも可）");
         appendLine("");
         return;
@@ -533,10 +509,6 @@
         appendLine("  post          : " + (state.enablePost ? "ON" : "OFF"));
         appendLine("  comment       : " + (state.enableComment ? "ON" : "OFF"));
         appendLine("  record        : " + (state.enableVideo ? "ON" : "OFF"));
-        appendLine("  titleMessage  : " + (state.titleMessage || "お知らせ"));
-        appendLine("  message       : " + (state.message || "メッセージ"));
-        appendLine("  commentMsg    : " + (state.commentMessage || "(未設定 -> messageを使用)"));
-        appendLine("  gifFile       : " + (state.gifFile || "_______.gif"));
         appendLine("  commentRepeat : " + state.commentRepeat);
         appendLine("  cookie        : " + (state.cookie ? `設定済み (${state.cookie.length} 文字)` : "(未設定)"));
         appendLine("  repeat        : " + state.repeat);
@@ -601,34 +573,6 @@
         state.roomUrl = nextRoom;
         saveState();
         appendLine("roomUrl を更新しました: " + state.roomUrl, "green");
-        return;
-      }
-
-      if (cmd === "set-title") {
-        state.titleMessage = stripOuterQuotes(argText);
-        saveState();
-        appendLine("titleMessage を更新しました: " + state.titleMessage, "green");
-        return;
-      }
-
-      if (cmd === "set-msg") {
-        state.message = stripOuterQuotes(argText);
-        saveState();
-        appendLine("message を更新しました: " + state.message, "green");
-        return;
-      }
-
-      if (cmd === "set-cmsg") {
-        state.commentMessage = stripOuterQuotes(argText);
-        saveState();
-        appendLine("commentMessage を更新しました: " + state.commentMessage, "green");
-        return;
-      }
-
-      if (cmd === "set-gif" || cmd === "set-image") {
-        state.gifFile = stripOuterQuotes(argText);
-        saveState();
-        appendLine("gifFile を更新しました: " + state.gifFile, "green");
         return;
       }
 
