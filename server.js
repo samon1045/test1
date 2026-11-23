@@ -116,6 +116,13 @@ async function downloadGifToTemp(gifUrl) {
   }
 }
 
+function cleanupDir(dirPath) {
+  if (!dirPath || !fs.existsSync(dirPath)) return;
+  try {
+    fs.rmSync(dirPath, { recursive: true, force: true });
+  } catch (_) {}
+}
+
 app.get("/", (req, res) => {
   res.json({ status: "ok", mode: "playwright-ready" });
 });
@@ -124,9 +131,11 @@ app.post("/run", async (req, res) => {
   const {
     roomUrl = "",
     message = "",
+    commentMessage = "",
     gifUrl = "",
     cookie = "",
     repeat = 2,
+    commentRepeat = 1,
     enablePost = true,
     enableComment = false
   } = req.body || {};
@@ -147,10 +156,14 @@ app.post("/run", async (req, res) => {
   }
 
   const count = Math.max(1, Math.min(10, Number(repeat) || 2));
+  const cRepeat = Math.max(1, Math.min(10, Number(commentRepeat) || 1));
   const logs = [];
   let browser;
+  let context;
+  let page;
   let gifFilePath = null;
   let detectedSections = 0;
+  const videoDir = fs.mkdtempSync(path.join(os.tmpdir(), "padlet_rec_"));
 
   try {
     if (doPost) {
@@ -167,10 +180,14 @@ app.post("/run", async (req, res) => {
       ]
     });
 
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
+    context = await browser.newContext({
+      viewport: { width: 1280, height: 720 },
       userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+      recordVideo: {
+        dir: videoDir,
+        size: { width: 1280, height: 720 }
+      }
     });
 
     const cookies = normalizeCookies(cookie, trimmedUrl);
@@ -178,7 +195,7 @@ app.post("/run", async (req, res) => {
       await context.addCookies(cookies);
     }
 
-    const page = await context.newPage();
+    page = await context.newPage();
     await page.goto(trimmedUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
     await sleep(6000);
 
@@ -194,17 +211,38 @@ app.post("/run", async (req, res) => {
 
     if (doComment) {
       if (doPost) {
-        // 投稿後にコメントも行う場合は少し待ってからボード全体へコメント
         await sleep(2000);
       }
       const commentResult = await runComments(page, {
         message,
-        maxComments: 50
+        commentMessage,
+        commentRepeat: cRepeat,
+        maxPosts: 50
       });
       logs.push(...commentResult.logs);
     }
 
+    const videoObj = page.video();
+    await page.close();
+    await context.close();
+    context = null;
+
+    let videoBase64 = null;
+    let videoFileName = null;
+    if (videoObj) {
+      const savedPath = await videoObj.path().catch(() => null);
+      if (savedPath && fs.existsSync(savedPath)) {
+        const buf = fs.readFileSync(savedPath);
+        if (buf.length > 0) {
+          videoBase64 = buf.toString("base64");
+          videoFileName = `samon_run_${Date.now()}.webm`;
+        }
+      }
+    }
+
     await browser.close();
+    browser = null;
+
     const successCount = logs.filter((l) => l.status === "ok").length;
 
     return res.json({
@@ -215,9 +253,17 @@ app.post("/run", async (req, res) => {
       cookiesLoaded: cookies.length,
       totalSteps: logs.length,
       successCount,
-      logs
+      logs,
+      videoBase64,
+      videoMimeType: videoBase64 ? "video/webm" : null,
+      videoFileName
     });
   } catch (err) {
+    if (context) {
+      try {
+        await context.close();
+      } catch (_) {}
+    }
     if (browser) {
       try {
         await browser.close();
@@ -229,6 +275,7 @@ app.post("/run", async (req, res) => {
       logs
     });
   } finally {
+    cleanupDir(videoDir);
     if (gifFilePath && fs.existsSync(gifFilePath)) {
       try {
         fs.unlinkSync(gifFilePath);
