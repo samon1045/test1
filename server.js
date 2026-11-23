@@ -125,6 +125,144 @@ async function sleepWithStop(ms, shouldStop) {
   return shouldStop();
 }
 
+async function waitForPadletBoardReady(page, shouldStop, maxWaitMs = 40000) {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    if (shouldStop()) return { ready: false, stopped: true };
+
+    const isReady = await page.evaluate(() => {
+      const textAll = (document.body && document.body.innerText) || "";
+      if (textAll.includes("セクション") || textAll.includes("投稿")) {
+        const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+        return btns.some((b) => {
+          const r = b.getBoundingClientRect();
+          const t = (b.innerText || "").trim();
+          const a = (b.getAttribute("aria-label") || "").toLowerCase();
+          return (
+            r.width > 0 &&
+            r.height > 0 &&
+            (t.includes("投稿") || t === "+" || a.includes("add") || a.includes("post"))
+          );
+        });
+      }
+      return false;
+    });
+
+    if (isReady) {
+      const stopped = await sleepWithStop(1200, shouldStop);
+      return { ready: true, stopped };
+    }
+
+    const stopped = await sleepWithStop(800, shouldStop);
+    if (stopped) return { ready: false, stopped: true };
+  }
+
+  return { ready: false, stopped: shouldStop() };
+}
+
+async function inspectSectionsAndAddButtons(page) {
+  return page.evaluate(() => {
+    const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, div, span, p"));
+    const sectionTitles = [];
+    for (const el of headings) {
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0 || r.y < 0 || r.y > 450) continue;
+      const t = (el.innerText || "").trim();
+      if (/^セクション\s*\d+$/i.test(t) && !sectionTitles.includes(t)) {
+        sectionTitles.push(t);
+      }
+    }
+
+    const allBtns = Array.from(
+      document.querySelectorAll('button, [role="button"], [data-testid*="add"]')
+    );
+    const addButtons = allBtns.filter((btn) => {
+      const r = btn.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return false;
+      const t = (btn.innerText || "").trim();
+      const a = (btn.getAttribute("aria-label") || "").toLowerCase();
+      const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
+      return (
+        t === "+" ||
+        t.includes("投稿") ||
+        t.includes("Add") ||
+        t.includes("追加") ||
+        a.includes("add") ||
+        a.includes("post") ||
+        a.includes("追加") ||
+        a.includes("投稿") ||
+        testid.includes("add") ||
+        testid.includes("post")
+      );
+    });
+
+    return {
+      sectionTitles,
+      addButtonCount: addButtons.length
+    };
+  });
+}
+
+async function clickAddButtonForSection(page, secIdx, sectionTitle) {
+  const clicked = await page.evaluate((idx) => {
+    const allBtns = Array.from(
+      document.querySelectorAll('button, [role="button"], [data-testid*="add"]')
+    );
+    const addButtons = allBtns.filter((btn) => {
+      const r = btn.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return false;
+      const t = (btn.innerText || "").trim();
+      const a = (btn.getAttribute("aria-label") || "").toLowerCase();
+      const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
+      return (
+        t === "+" ||
+        t.includes("投稿") ||
+        t.includes("Add") ||
+        t.includes("追加") ||
+        a.includes("add") ||
+        a.includes("post") ||
+        a.includes("追加") ||
+        a.includes("投稿") ||
+        testid.includes("add") ||
+        testid.includes("post")
+      );
+    });
+
+    if (addButtons.length === 0) return false;
+
+    // セクションごとの追加ボタンが複数ある場合は idx 番目、右下の「+ 投稿」1個のみの場合は 0 番目を押す
+    const target = addButtons.length > 1 && addButtons[idx] ? addButtons[idx] : addButtons[0];
+    target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+    target.click();
+    return true;
+  }, secIdx);
+
+  if (!clicked) return false;
+
+  // セクション選択UIが出た場合に備えて該当セクション名があればクリック
+  if (sectionTitle) {
+    await sleep(500);
+    await page.evaluate((targetTitle) => {
+      const items = Array.from(
+        document.querySelectorAll('button, [role="button"], [role="option"], li, div, span')
+      );
+      for (const el of items) {
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        const t = (el.innerText || "").trim();
+        if (t === targetTitle) {
+          const clickable = el.closest('button, [role="button"], [role="option"], li') || el;
+          clickable.click();
+          return true;
+        }
+      }
+      return false;
+    }, sectionTitle);
+  }
+
+  return true;
+}
+
 process.on("unhandledRejection", (reason) => {
   console.error("Unhandled Rejection:", reason);
 });
@@ -197,10 +335,9 @@ app.post("/run", async (req, res) => {
   const totalRounds = Math.max(1, Math.min(10, Number(repeat) || 2));
   const cRepeat = Math.max(1, Math.min(10, Number(commentRepeat) || 1));
 
-  // 決まったタイトル・メッセージ・コメント
-  const titleMessage = "シブリバ共栄圏(Sybliva)万歳！！";
-  const customMessage = "お前らやりませんね杉！！ここはシベリア共栄圏に荒らされました！ｗ今すぐシベリア共栄圏に参加！https://script.google.com/macros/s/AKfycbzkryPCQ7qVWjzTRTLpa-CfT1N1qYzRMcPtCi9wmRl7JpJunf3sweeJ17Z4GrbA9NZJIw/exec パスワードがわからない人はあきらめてねー！ww普通はわかるけどねwww荒らしかえすことだけしか考えれないのかｗｗｗ ぜひ参加してねww 荒らし対策もうちょっとしてね～wwもっと頑張ってねwwじゃあお疲れｗそんじゃがんばれがんばれｗｗ";
-  const commentMessage = "お前らやりませんね杉！！ここはシベリア共栄圏に荒らされました！ｗ今すぐシベリア共栄圏に参加！https://script.google.com/macros/s/AKfycbzkryPCQ7qVWjzTRTLpa-CfT1N1qYzRMcPtCi9wmRl7JpJunf3sweeJ17Z4GrbA9NZJIw/exec パスワードがわからない人はあきらめてねー！ww普通はわかるけどねwww荒らしかえすことだけしか考えれないのかｗｗｗ ぜひ参加してねww 荒らし対策もうちょっとしてね～wwもっと頑張ってねwwじゃあお疲れｗそんじゃがんばれがんばれｗｗ";
+  const titleMessage = "お知らせ";
+  const customMessage = "メッセージ";
+  const commentMessage = "メッセージ";
   const imagePath = resolveLocalGifPath();
 
   const logs = [];
@@ -256,7 +393,8 @@ app.post("/run", async (req, res) => {
       stoppedByUser = true;
     } else {
       await page.goto(parsedUrl.toString(), { waitUntil: "domcontentloaded", timeout: 60000 });
-      stoppedByUser = await sleepWithStop(6000, shouldStop);
+      const boardWait = await waitForPadletBoardReady(page, shouldStop, 40000);
+      stoppedByUser = boardWait.stopped;
     }
 
     if (!stoppedByUser) {
@@ -267,32 +405,8 @@ app.post("/run", async (req, res) => {
         }
 
         if (doPost) {
-          const totalSections = await page.evaluate(() => {
-            const addBtns = Array.from(
-              document.querySelectorAll('button, [role="button"], [data-testid*="add"]')
-            );
-            let count = 0;
-            for (const btn of addBtns) {
-              const rect = btn.getBoundingClientRect();
-              const text = (btn.innerText || "").trim();
-              const aria = btn.getAttribute("aria-label") || "";
-              const cls = typeof btn.className === "string" ? btn.className : "";
-              if (
-                (text === "+" ||
-                  aria.includes("Add") ||
-                  aria.includes("追加") ||
-                  cls.includes("add")) &&
-                rect.y > 0 &&
-                rect.y < 350 &&
-                rect.width > 0
-              ) {
-                count++;
-              }
-            }
-            return count;
-          });
-
-          const loopCount = Math.max(totalSections, 1);
+          const info = await inspectSectionsAndAddButtons(page);
+          const loopCount = Math.max(info.sectionTitles.length, 1);
           detectedSections = loopCount;
 
           for (let secIdx = 0; secIdx < loopCount; secIdx++) {
@@ -301,36 +415,10 @@ app.post("/run", async (req, res) => {
               break;
             }
 
+            const sectionTitle = info.sectionTitles[secIdx] || `セクション${secIdx + 1}`;
             const sectionName = `Section ${secIdx + 1}`;
             try {
-              const clickedAdd = await page.evaluate((targetIdx) => {
-                const addBtns = Array.from(
-                  document.querySelectorAll('button, [role="button"], [data-testid*="add"]')
-                );
-                let count = 0;
-                for (const btn of addBtns) {
-                  const rect = btn.getBoundingClientRect();
-                  const text = (btn.innerText || "").trim();
-                  const aria = btn.getAttribute("aria-label") || "";
-                  const cls = typeof btn.className === "string" ? btn.className : "";
-                  if (
-                    (text === "+" ||
-                      aria.includes("Add") ||
-                      aria.includes("追加") ||
-                      cls.includes("add")) &&
-                    rect.y > 0 &&
-                    rect.y < 350 &&
-                    rect.width > 0
-                  ) {
-                    if (count === targetIdx) {
-                      btn.click();
-                      return true;
-                    }
-                    count++;
-                  }
-                }
-                return false;
-              }, secIdx);
+              const clickedAdd = await clickAddButtonForSection(page, secIdx, sectionTitle);
 
               if (!clickedAdd) {
                 logs.push({
@@ -425,7 +513,9 @@ app.post("/run", async (req, res) => {
                 section: sectionName,
                 attempt: roundNum,
                 status: "ok",
-                detail: pubClicked ? "投稿を送信しました" : "ショートカットで投稿を送信しました",
+                detail: pubClicked
+                  ? `${sectionTitle} へ投稿を送信しました`
+                  : `${sectionTitle} へショートカットで投稿を送信しました`,
                 timestamp: new Date().toISOString()
               });
 
@@ -550,10 +640,9 @@ app.post("/run", async (req, res) => {
 
         if (roundNum < totalRounds) {
           await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
-          if (await sleepWithStop(5000, shouldStop)) {
-            stoppedByUser = true;
-            break;
-          }
+          const reloadWait = await waitForPadletBoardReady(page, shouldStop, 40000);
+          stoppedByUser = reloadWait.stopped;
+          if (stoppedByUser) break;
         }
       }
     }
