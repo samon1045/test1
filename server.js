@@ -10,7 +10,7 @@ const { sleep, cleanupDir, cleanupFile } = require("./utils");
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const MAX_VIDEO_BYTES = 35 * 1024 * 1024; // 通信断・メモリ圧迫を防ぐため35MB上限
+const MAX_VIDEO_BYTES = 35 * 1024 * 1024;
 
 const activeJobs = new Map();
 
@@ -22,6 +22,18 @@ app.use(
   })
 );
 app.use(express.json({ limit: "2mb" }));
+
+function withTimeout(promise, ms, fallbackValue = null) {
+  let timer = null;
+  return Promise.race([
+    promise.finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(fallbackValue), ms);
+    })
+  ]);
+}
 
 function normalizeCookies(rawCookie, targetUrl = "https://padlet.com") {
   if (!rawCookie) return [];
@@ -108,8 +120,8 @@ function resolveLocalGifPath() {
 }
 
 async function setEditableValueExact(locator, text) {
-  await locator.click();
-  await locator.fill(text);
+  await locator.click({ timeout: 8000 });
+  await locator.fill(text, { timeout: 8000 });
 }
 
 async function sleepWithStop(ms, shouldStop) {
@@ -129,23 +141,25 @@ async function waitForPadletBoardReady(page, shouldStop, maxWaitMs = 40000) {
   while (Date.now() - start < maxWaitMs) {
     if (shouldStop()) return { ready: false, stopped: true };
 
-    const isReady = await page.evaluate(() => {
-      const textAll = (document.body && document.body.innerText) || "";
-      if (textAll.includes("セクション") || textAll.includes("投稿")) {
-        const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
-        return btns.some((b) => {
-          const r = b.getBoundingClientRect();
-          const t = (b.innerText || "").trim();
-          const a = (b.getAttribute("aria-label") || "").toLowerCase();
-          return (
-            r.width > 0 &&
-            r.height > 0 &&
-            (t.includes("投稿") || t === "+" || a.includes("add") || a.includes("post"))
-          );
-        });
-      }
-      return false;
-    });
+    const isReady = await page
+      .evaluate(() => {
+        const textAll = (document.body && document.body.innerText) || "";
+        if (textAll.includes("セクション") || textAll.includes("投稿")) {
+          const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+          return btns.some((b) => {
+            const r = b.getBoundingClientRect();
+            const t = (b.innerText || "").trim();
+            const a = (b.getAttribute("aria-label") || "").toLowerCase();
+            return (
+              r.width > 0 &&
+              r.height > 0 &&
+              (t.includes("投稿") || t === "+" || a.includes("add") || a.includes("post"))
+            );
+          });
+        }
+        return false;
+      })
+      .catch(() => false);
 
     if (isReady) {
       const stopped = await sleepWithStop(1200, shouldStop);
@@ -160,58 +174,115 @@ async function waitForPadletBoardReady(page, shouldStop, maxWaitMs = 40000) {
 }
 
 async function inspectSections(page) {
-  return page.evaluate(() => {
-    const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, div, span, p"));
-    const sectionTitles = [];
-    for (const el of headings) {
-      const r = el.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0 || r.y < 0 || r.y > 450) continue;
-      const t = (el.innerText || "").trim();
-      if (/^セクション\s*\d+$/i.test(t) && !sectionTitles.includes(t)) {
-        sectionTitles.push(t);
+  return page
+    .evaluate(() => {
+      const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, div, span, p"));
+      const seen = new Set();
+      const sections = [];
+
+      for (const el of headings) {
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0 || r.y < 0 || r.y > 500) continue;
+        const t = (el.innerText || "").trim();
+        if (/^セクション\s*\d+$/i.test(t) && !seen.has(t)) {
+          seen.add(t);
+          sections.push({
+            title: t,
+            centerX: r.left + r.width / 2,
+            left: r.left,
+            right: r.right
+          });
+        }
       }
-    }
-    return { sectionTitles };
-  });
+
+      sections.sort((a, b) => a.centerX - b.centerX);
+      return { sections };
+    })
+    .catch(() => ({ sections: [] }));
 }
 
-async function clickAddButtonForSection(page, secIdx, sectionTitle) {
-  const clicked = await page.evaluate((idx) => {
-    const allBtns = Array.from(
-      document.querySelectorAll('button, [role="button"], [data-testid*="add"]')
-    );
-    const addButtons = allBtns.filter((btn) => {
-      const r = btn.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) return false;
-      const t = (btn.innerText || "").trim();
-      const a = (btn.getAttribute("aria-label") || "").toLowerCase();
-      const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
-      return (
-        t === "+" ||
-        t.includes("投稿") ||
-        t.includes("Add") ||
-        t.includes("追加") ||
-        a.includes("add") ||
-        a.includes("post") ||
-        a.includes("追加") ||
-        a.includes("投稿") ||
-        testid.includes("add") ||
-        testid.includes("post")
+async function clickAddButtonForSection(page, secIdx, sectionObj) {
+  const sectionTitle = sectionObj && sectionObj.title ? sectionObj.title : `セクション${secIdx + 1}`;
+  const targetCenterX = sectionObj && typeof sectionObj.centerX === "number" ? sectionObj.centerX : null;
+
+  const result = await page
+    .evaluate(({ idx, title, centerX }) => {
+      const allBtns = Array.from(
+        document.querySelectorAll('button, [role="button"], [data-testid*="add"]')
       );
-    });
 
-    if (addButtons.length === 0) return false;
-    const target = addButtons.length > 1 && addButtons[idx] ? addButtons[idx] : addButtons[0];
-    target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
-    target.click();
-    return true;
-  }, secIdx);
+      const isAddLike = (btn) => {
+        const r = btn.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        const t = (btn.innerText || "").trim();
+        const a = (btn.getAttribute("aria-label") || "").toLowerCase();
+        const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
+        return (
+          t === "+" ||
+          t.includes("Add") ||
+          t.includes("追加") ||
+          a.includes("add") ||
+          a.includes("追加") ||
+          testid.includes("add")
+        );
+      };
 
-  if (!clicked) return false;
+      // 1. まずセクション列のX座標に近い「+ / 追加」ボタンを探す
+      if (centerX !== null) {
+        const columnPlusBtns = allBtns
+          .filter((btn) => {
+            if (!isAddLike(btn)) return false;
+            const r = btn.getBoundingClientRect();
+            const bx = r.left + r.width / 2;
+            return Math.abs(bx - centerX) < 220 && r.y > 40 && r.y < window.innerHeight - 80;
+          })
+          .sort((a, b) => {
+            const ra = a.getBoundingClientRect();
+            const rb = b.getBoundingClientRect();
+            return Math.abs(ra.left + ra.width / 2 - centerX) - Math.abs(rb.left + rb.width / 2 - centerX);
+          });
 
-  if (sectionTitle) {
-    await sleep(500);
-    await page.evaluate((targetTitle) => {
+        if (columnPlusBtns.length > 0) {
+          const target = columnPlusBtns[0];
+          target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+          target.click();
+          return { clicked: true, mode: "column-plus" };
+        }
+      }
+
+      // 2. なければ汎用追加/投稿ボタンを探す
+      const generalBtns = allBtns.filter((btn) => {
+        const r = btn.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        const t = (btn.innerText || "").trim();
+        const a = (btn.getAttribute("aria-label") || "").toLowerCase();
+        const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
+        return (
+          isAddLike(btn) ||
+          t.includes("投稿") ||
+          a.includes("post") ||
+          a.includes("投稿") ||
+          testid.includes("post")
+        );
+      });
+
+      if (generalBtns.length === 0) {
+        return { clicked: false, mode: "none" };
+      }
+
+      const target = generalBtns.length > 1 && generalBtns[idx] ? generalBtns[idx] : generalBtns[0];
+      target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+      target.click();
+      return { clicked: true, mode: "general", title };
+    }, { idx: secIdx, title: sectionTitle, centerX: targetCenterX })
+    .catch(() => ({ clicked: false, mode: "error" }));
+
+  if (!result || !result.clicked) return false;
+
+  // フォーム内のセクション選択UIがあれば対象セクションを選ぶ
+  await sleep(500);
+  await page
+    .evaluate((targetTitle) => {
       const items = Array.from(
         document.querySelectorAll('button, [role="button"], [role="option"], li, div, span')
       );
@@ -226,8 +297,8 @@ async function clickAddButtonForSection(page, secIdx, sectionTitle) {
         }
       }
       return false;
-    }, sectionTitle);
-  }
+    }, sectionTitle)
+    .catch(() => false);
 
   return true;
 }
@@ -329,7 +400,8 @@ app.post("/run", async (req, res) => {
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
-        "--disable-gpu"
+        "--disable-gpu",
+        "--no-zygote"
       ]
     });
 
@@ -379,7 +451,8 @@ app.post("/run", async (req, res) => {
 
         if (doPost) {
           const info = await inspectSections(page);
-          const loopCount = Math.max(info.sectionTitles.length, 1);
+          const sectionList = info.sections || [];
+          const loopCount = Math.max(sectionList.length, 1);
           detectedSections = loopCount;
 
           for (let secIdx = 0; secIdx < loopCount; secIdx++) {
@@ -388,10 +461,10 @@ app.post("/run", async (req, res) => {
               break;
             }
 
-            const sectionTitle = info.sectionTitles[secIdx] || `セクション${secIdx + 1}`;
+            const secObj = sectionList[secIdx] || { title: `セクション${secIdx + 1}`, centerX: null };
             const sectionName = `Section ${secIdx + 1}`;
             try {
-              const clickedAdd = await clickAddButtonForSection(page, secIdx, sectionTitle);
+              const clickedAdd = await clickAddButtonForSection(page, secIdx, secObj);
 
               if (!clickedAdd) {
                 logs.push({
@@ -413,7 +486,7 @@ app.post("/run", async (req, res) => {
               const editables = page.locator(
                 'div[contenteditable="true"], textarea, input[type="text"]'
               );
-              const editableCount = await editables.count();
+              const editableCount = await editables.count().catch(() => 0);
               if (editableCount > 0) {
                 await setEditableValueExact(editables.nth(0), titleMessage);
               }
@@ -429,8 +502,8 @@ app.post("/run", async (req, res) => {
               if (imagePath && fs.existsSync(imagePath)) {
                 try {
                   const fileInput = page.locator('input[type="file"]').first();
-                  if ((await fileInput.count()) > 0) {
-                    await fileInput.setInputFiles(imagePath);
+                  if ((await fileInput.count().catch(() => 0)) > 0) {
+                    await fileInput.setInputFiles(imagePath, { timeout: 10000 });
                     if (await sleepWithStop(2000, shouldStop)) {
                       stoppedByUser = true;
                       break;
@@ -448,37 +521,39 @@ app.post("/run", async (req, res) => {
                 }
               }
 
-              const pubClicked = await page.evaluate(() => {
-                const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-                for (const b of buttons) {
-                  const t = (b.innerText || "").trim();
-                  const a = (b.getAttribute("aria-label") || "").toLowerCase();
-                  const testid = (b.getAttribute("data-testid") || "").toLowerCase();
-                  const cls = typeof b.className === "string" ? b.className : "";
-                  const rect = b.getBoundingClientRect();
-                  if (rect.width > 0 && rect.height > 0 && rect.x > window.innerWidth / 2) {
-                    if (
-                      t.includes("公開") ||
-                      t.includes("Publish") ||
-                      t.includes("送信") ||
-                      a.includes("publish") ||
-                      a.includes("submit") ||
-                      a.includes("send") ||
-                      testid.includes("publish") ||
-                      testid.includes("submit") ||
-                      cls.includes("primary") ||
-                      cls.includes("submit")
-                    ) {
-                      b.click();
-                      return true;
+              const pubClicked = await page
+                .evaluate(() => {
+                  const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+                  for (const b of buttons) {
+                    const t = (b.innerText || "").trim();
+                    const a = (b.getAttribute("aria-label") || "").toLowerCase();
+                    const testid = (b.getAttribute("data-testid") || "").toLowerCase();
+                    const cls = typeof b.className === "string" ? b.className : "";
+                    const rect = b.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0 && rect.x > window.innerWidth / 2) {
+                      if (
+                        t.includes("公開") ||
+                        t.includes("Publish") ||
+                        t.includes("送信") ||
+                        a.includes("publish") ||
+                        a.includes("submit") ||
+                        a.includes("send") ||
+                        testid.includes("publish") ||
+                        testid.includes("submit") ||
+                        cls.includes("primary") ||
+                        cls.includes("submit")
+                      ) {
+                        b.click();
+                        return true;
+                      }
                     }
                   }
-                }
-                return false;
-              });
+                  return false;
+                })
+                .catch(() => false);
 
               if (!pubClicked) {
-                await page.keyboard.press("Control+Enter");
+                await page.keyboard.press("Control+Enter").catch(() => {});
               }
 
               logs.push({
@@ -487,8 +562,8 @@ app.post("/run", async (req, res) => {
                 attempt: roundNum,
                 status: "ok",
                 detail: pubClicked
-                  ? `${sectionTitle} へ投稿を送信しました`
-                  : `${sectionTitle} へショートカットで投稿を送信しました`,
+                  ? `${secObj.title} へ投稿を送信しました`
+                  : `${secObj.title} へショートカットで投稿を送信しました`,
                 timestamp: new Date().toISOString()
               });
 
@@ -518,27 +593,29 @@ app.post("/run", async (req, res) => {
               break;
             }
 
-            const opened = await page.evaluate(() => {
-              const allEls = Array.from(
-                document.querySelectorAll('button, [role="button"], span, div')
-              );
-              for (const el of allEls) {
-                const t = (el.innerText || "").trim();
-                const a = el.getAttribute("aria-label") || "";
-                if (
-                  t.includes("Add comment") ||
-                  t.includes("コメントを追加") ||
-                  a.toLowerCase().includes("comment")
-                ) {
-                  const rect = el.getBoundingClientRect();
-                  if (rect.width > 0 && rect.height > 0) {
-                    el.click();
-                    return true;
+            const opened = await page
+              .evaluate(() => {
+                const allEls = Array.from(
+                  document.querySelectorAll('button, [role="button"], span, div')
+                );
+                for (const el of allEls) {
+                  const t = (el.innerText || "").trim();
+                  const a = el.getAttribute("aria-label") || "";
+                  if (
+                    t.includes("Add comment") ||
+                    t.includes("コメントを追加") ||
+                    a.toLowerCase().includes("comment")
+                  ) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) {
+                      el.click();
+                      return true;
+                    }
                   }
                 }
-              }
-              return false;
-            });
+                return false;
+              })
+              .catch(() => false);
 
             if (!opened) break;
 
@@ -548,8 +625,8 @@ app.post("/run", async (req, res) => {
             }
 
             const editor = page.locator('div[contenteditable="true"], textarea').last();
-            if ((await editor.count()) === 0) {
-              await page.keyboard.press("Escape");
+            if ((await editor.count().catch(() => 0)) === 0) {
+              await page.keyboard.press("Escape").catch(() => {});
               break;
             }
 
@@ -565,29 +642,31 @@ app.post("/run", async (req, res) => {
                 break;
               }
 
-              const sentByButton = await page.evaluate(() => {
-                const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-                for (const b of buttons) {
-                  const t = (b.innerText || "").trim();
-                  const a = (b.getAttribute("aria-label") || "").toLowerCase();
-                  const rect = b.getBoundingClientRect();
-                  if (
-                    rect.width > 0 &&
-                    rect.height > 0 &&
-                    (t.includes("コメント") ||
-                      t.includes("Comment") ||
-                      a.includes("send") ||
-                      a.includes("送信"))
-                  ) {
-                    b.click();
-                    return true;
+              const sentByButton = await page
+                .evaluate(() => {
+                  const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+                  for (const b of buttons) {
+                    const t = (b.innerText || "").trim();
+                    const a = (b.getAttribute("aria-label") || "").toLowerCase();
+                    const rect = b.getBoundingClientRect();
+                    if (
+                      rect.width > 0 &&
+                      rect.height > 0 &&
+                      (t.includes("コメント") ||
+                        t.includes("Comment") ||
+                        a.includes("send") ||
+                        a.includes("送信"))
+                    ) {
+                      b.click();
+                      return true;
+                    }
                   }
-                }
-                return false;
-              });
+                  return false;
+                })
+                .catch(() => false);
 
               if (!sentByButton) {
-                await page.keyboard.press("Enter");
+                await page.keyboard.press("Enter").catch(() => {});
               }
 
               logs.push({
@@ -622,7 +701,7 @@ app.post("/run", async (req, res) => {
 
     const videoObj = doVideo && page ? page.video() : null;
     if (context) {
-      await context.close();
+      await withTimeout(context.close(), 7000, null);
       context = null;
       page = null;
     }
@@ -630,7 +709,7 @@ app.post("/run", async (req, res) => {
     let videoBase64 = null;
     let videoFileName = null;
     if (videoObj) {
-      const savedPath = await videoObj.path().catch(() => null);
+      const savedPath = await withTimeout(videoObj.path(), 5000, null);
       if (savedPath && fs.existsSync(savedPath)) {
         const stat = fs.statSync(savedPath);
         if (stat.size > 0 && stat.size <= MAX_VIDEO_BYTES) {
@@ -642,7 +721,7 @@ app.post("/run", async (req, res) => {
     }
 
     if (browser) {
-      await browser.close();
+      await withTimeout(browser.close(), 5000, null);
       browser = null;
     }
 
@@ -677,10 +756,10 @@ app.post("/run", async (req, res) => {
   } finally {
     activeJobs.delete(jobId);
     if (context) {
-      await context.close().catch(() => {});
+      await withTimeout(context.close().catch(() => {}), 3000, null);
     }
     if (browser) {
-      await browser.close().catch(() => {});
+      await withTimeout(browser.close().catch(() => {}), 3000, null);
     }
     if (authFile) {
       cleanupFile(authFile);
