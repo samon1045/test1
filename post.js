@@ -2,6 +2,66 @@ const fs = require("fs");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function isLikelyImageFile(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return false;
+  try {
+    const fd = fs.openSync(filePath, "r");
+    const buf = Buffer.alloc(12);
+    const bytesRead = fs.readSync(fd, buf, 0, 12, 0);
+    fs.closeSync(fd);
+    if (bytesRead < 4) return false;
+
+    const headerStr = buf.toString("ascii", 0, 6);
+    // GIF87a / GIF89a
+    if (headerStr === "GIF87a" || headerStr === "GIF89a") return true;
+    // PNG: 89 50 4E 47
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return true;
+    // JPEG: FF D8 FF
+    if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true;
+    // WEBP: RIFF....WEBP
+    if (
+      buf.toString("ascii", 0, 4) === "RIFF" &&
+      bytesRead >= 12 &&
+      buf.toString("ascii", 8, 12) === "WEBP"
+    ) {
+      return true;
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function dismissUploadErrorDialog(page) {
+  const closed = await page.evaluate(() => {
+    const bodyText = document.body ? document.body.innerText || "" : "";
+    const hasError =
+      bodyText.includes("添付ファイルの読み込み中にエラーが発生しました") ||
+      bodyText.includes("ファイルのアップロード中にエラーが発生しました") ||
+      bodyText.includes("写真をアップロードできませんでした");
+
+    if (!hasError) return false;
+
+    const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+    const cancelBtn = btns.find((b) => {
+      const r = b.getBoundingClientRect();
+      const t = (b.innerText || "").trim();
+      return r.width > 0 && r.height > 0 && (t === "キャンセル" || t.includes("キャンセル") || t.toLowerCase().includes("cancel"));
+    });
+
+    if (cancelBtn) {
+      cancelBtn.click();
+      return true;
+    }
+    return false;
+  });
+
+  if (closed) {
+    await sleep(700);
+  }
+  return closed;
+}
+
 async function detectSections(page) {
   return page.evaluate(() => {
     const addButtons = Array.from(document.querySelectorAll('button, [role="button"]')).filter((el) => {
@@ -65,58 +125,43 @@ async function waitForPostInputs(page, timeoutMs = 5000) {
 }
 
 async function attachGifToComposer(page, gifFilePath) {
-  if (!gifFilePath || !fs.existsSync(gifFilePath)) return false;
+  if (!isLikelyImageFile(gifFilePath)) {
+    return false;
+  }
 
+  let uploaded = false;
   const fileInputs = page.locator('input[type="file"]');
   if ((await fileInputs.count()) > 0) {
     try {
       await fileInputs.last().setInputFiles(gifFilePath, { timeout: 5000 });
-      await sleep(2200);
+      uploaded = true;
     } catch (_) {}
   }
 
-  const base64Data = fs.readFileSync(gifFilePath).toString("base64");
-  await page.evaluate(async (b64) => {
-    const binStr = atob(b64);
-    const bytes = new Uint8Array(binStr.length);
-    for (let i = 0; i < binStr.length; i++) {
-      bytes[i] = binStr.charCodeAt(i);
+  // アップロード完了またはエラーダイアログ出現を最大6秒監視
+  const start = Date.now();
+  while (Date.now() - start < 6000) {
+    const hadError = await dismissUploadErrorDialog(page);
+    if (hadError) {
+      return false;
     }
-    const file = new File([bytes], "anim.gif", { type: "image/gif" });
-
-    if (navigator.clipboard && typeof ClipboardItem !== "undefined") {
-      try {
-        await navigator.clipboard.write([new ClipboardItem({ "image/gif": file })]);
-      } catch (_) {}
-    }
-
-    const targets = Array.from(
-      document.querySelectorAll('[contenteditable="true"], textarea, input[type="text"], [role="dialog"]')
-    ).filter((el) => {
-      const r = el.getBoundingClientRect();
-      return r.width > 0 && r.height > 0 && r.x > window.innerWidth * 0.35;
+    const stillUploading = await page.evaluate(() => {
+      const txt = document.body ? document.body.innerText || "" : "";
+      return txt.includes("アップロードしています");
     });
+    if (uploaded && !stillUploading && Date.now() - start > 1500) {
+      break;
+    }
+    await sleep(400);
+  }
 
-    const target = targets[targets.length - 1] || document.activeElement || document.body;
-    target.focus();
-
-    const dt = new DataTransfer();
-    dt.items.add(file);
-    target.dispatchEvent(
-      new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt })
-    );
-  }, base64Data);
-
-  await sleep(600);
-  await page.keyboard.down("Control");
-  await page.keyboard.press("v");
-  await page.keyboard.up("Control");
-  await sleep(1000);
-
-  return true;
+  await dismissUploadErrorDialog(page);
+  return uploaded;
 }
 
 async function clickPublishAndEnsureClosed(page) {
+  await dismissUploadErrorDialog(page);
+
   const clicked = await page.evaluate(() => {
     const candidates = Array.from(document.querySelectorAll('button, [role="button"]')).filter((el) => {
       const rect = el.getBoundingClientRect();
@@ -143,6 +188,7 @@ async function clickPublishAndEnsureClosed(page) {
   }
 
   await sleep(2200);
+  await dismissUploadErrorDialog(page);
 
   await page.evaluate(() => {
     const closeBtns = Array.from(document.querySelectorAll('button, [role="button"]')).filter((el) => {
@@ -166,6 +212,8 @@ async function clickPublishAndEnsureClosed(page) {
 }
 
 async function createSinglePost(page, { sectionIndex, totalSections, message, gifFilePath }) {
+  await dismissUploadErrorDialog(page);
+
   let clickedAdd = false;
   if (totalSections > 0) {
     clickedAdd = await clickSectionAddButton(page, sectionIndex);
@@ -253,6 +301,7 @@ async function runPosts(page, { message, gifFilePath, repeat }) {
           timestamp: new Date().toISOString()
         });
       } catch (err) {
+        await dismissUploadErrorDialog(page).catch(() => {});
         logs.push({
           type: "post",
           section: sectionName,
