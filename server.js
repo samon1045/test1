@@ -1,11 +1,16 @@
 const express = require("express");
 const cors = require("cors");
 const { chromium } = require("playwright");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const { runPosts } = require("./post");
+const { runComments } = require("./comment");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// プリフライト (OPTIONS) を含め、すべてのオリジンとヘッダーを許可
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -40,11 +45,16 @@ function normalizeCookies(rawCookie, targetUrl = "https://padlet.com") {
     }
   } catch (_) {}
 
-  // 1) JSON配列形式の場合
   try {
     const parsed = typeof rawCookie === "string" ? JSON.parse(rawCookie) : rawCookie;
-    if (Array.isArray(parsed)) {
-      return parsed
+    const arr = Array.isArray(parsed)
+      ? Array.isArray(parsed[0])
+        ? parsed[0]
+        : parsed
+      : null;
+
+    if (Array.isArray(arr)) {
+      return arr
         .filter((c) => c && c.name && c.value !== undefined)
         .map((c) => {
           const cookieObj = {
@@ -67,11 +77,8 @@ function normalizeCookies(rawCookie, targetUrl = "https://padlet.com") {
           return cookieObj;
         });
     }
-  } catch (_) {
-    // JSONでなければ "key=value; key2=value2" 形式として処理する
-  }
+  } catch (_) {}
 
-  // 2) "name=value; name2=value2" 文字列形式の場合
   if (typeof rawCookie === "string" && rawCookie.includes("=")) {
     return rawCookie
       .split(";")
@@ -94,90 +101,19 @@ function normalizeCookies(rawCookie, targetUrl = "https://padlet.com") {
   return [];
 }
 
-async function createPadletPost(page, { sectionIndex, totalSections, message, gifUrl }) {
-  // 1. 投稿作成ボタンをクリック（セクション指定優先 → 全体ボタン）
-  let clickedCreate = false;
-
-  if (totalSections > 1) {
-    const sections = page.locator('[data-testid*="section"], section[aria-label], [class*="section"]');
-    const currentCount = await sections.count();
-    if (sectionIndex < currentCount) {
-      const targetSection = sections.nth(sectionIndex);
-      const secBtn = targetSection
-        .locator(
-          'button[aria-label*="Add post" i], button[aria-label*="投稿" i], button[data-testid*="add-post" i], button:has-text("+")'
-        )
-        .first();
-      if (await secBtn.count()) {
-        await secBtn.scrollIntoViewIfNeeded();
-        await secBtn.click({ timeout: 5000 });
-        clickedCreate = true;
-      }
-    }
+async function downloadGifToTemp(gifUrl) {
+  if (!gifUrl || !/^https?:\/\//i.test(gifUrl.trim())) return null;
+  try {
+    const res = await fetch(gifUrl.trim());
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length === 0) return null;
+    const tmpFile = path.join(os.tmpdir(), `padlet_gif_${Date.now()}.gif`);
+    fs.writeFileSync(tmpFile, buf);
+    return tmpFile;
+  } catch (_) {
+    return null;
   }
-
-  if (!clickedCreate) {
-    const globalBtn = page
-      .locator(
-        'button[aria-label*="Create post" i], button[aria-label*="Add post" i], button[aria-label*="投稿を作成" i], button[data-testid*="create-post" i], [data-testid="fab-create-post"]'
-      )
-      .first();
-    await globalBtn.waitFor({ state: "visible", timeout: 8000 });
-    await globalBtn.click();
-  }
-
-  await sleep(600);
-
-  // 2. 本文メッセージを入力
-  if (message) {
-    const bodyInput = page
-      .locator(
-        '[contenteditable="true"][data-placeholder*="write" i], [contenteditable="true"][aria-label*="body" i], [contenteditable="true"][aria-label*="write" i], textarea[placeholder*="write" i], textarea[aria-label*="body" i], [role="dialog"] [contenteditable="true"]'
-      )
-      .last();
-
-    await bodyInput.waitFor({ state: "visible", timeout: 8000 });
-    await bodyInput.click();
-    await page.keyboard.type(message, { delay: 15 });
-    await sleep(300);
-  }
-
-  // 3. GIF / リンクURLを添付
-  if (gifUrl) {
-    const attachBtn = page
-      .locator(
-        'button[aria-label*="GIF" i], button[aria-label*="Link" i], button[aria-label*="URL" i], button[aria-label*="リンク" i], button[data-testid*="link" i], button[data-testid*="gif" i]'
-      )
-      .first();
-
-    if (await attachBtn.count()) {
-      await attachBtn.click();
-      await sleep(400);
-
-      const urlInput = page
-        .locator(
-          'input[type="url"], input[placeholder*="http" i], input[placeholder*="link" i], input[placeholder*="URL" i], input[aria-label*="URL" i], input[aria-label*="link" i]'
-        )
-        .last();
-
-      if (await urlInput.count()) {
-        await urlInput.fill(gifUrl);
-        await page.keyboard.press("Enter");
-        await sleep(1200);
-      }
-    }
-  }
-
-  // 4. 投稿送信ボタンをクリック
-  const submitBtn = page
-    .locator(
-      'button:has-text("Publish"), button:has-text("Post"), button:has-text("投稿"), button:has-text("公開"), button[type="submit"]'
-    )
-    .last();
-
-  await submitBtn.waitFor({ state: "visible", timeout: 8000 });
-  await submitBtn.click();
-  await sleep(1200);
 }
 
 app.get("/", (req, res) => {
@@ -190,7 +126,9 @@ app.post("/run", async (req, res) => {
     message = "",
     gifUrl = "",
     cookie = "",
-    repeat = 2
+    repeat = 2,
+    enablePost = true,
+    enableComment = false
   } = req.body || {};
 
   const trimmedUrl = roomUrl.trim();
@@ -198,14 +136,35 @@ app.post("/run", async (req, res) => {
     return res.status(400).json({ ok: false, error: "roomUrl が指定されていません。" });
   }
 
+  const doPost = Boolean(enablePost);
+  const doComment = Boolean(enableComment);
+
+  if (!doPost && !doComment) {
+    return res.status(400).json({
+      ok: false,
+      error: "投稿（enablePost）とコメント（enableComment）が両方オフになっています。"
+    });
+  }
+
   const count = Math.max(1, Math.min(10, Number(repeat) || 2));
   const logs = [];
   let browser;
+  let gifFilePath = null;
+  let detectedSections = 0;
 
   try {
+    if (doPost) {
+      gifFilePath = await downloadGifToTemp(gifUrl);
+    }
+
     browser = await chromium.launch({
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu"
+      ]
     });
 
     const context = await browser.newContext({
@@ -220,40 +179,29 @@ app.post("/run", async (req, res) => {
     }
 
     const page = await context.newPage();
-    await page.goto(trimmedUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-    await sleep(2500);
+    await page.goto(trimmedUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await sleep(6000);
 
-    const sectionCount = await page.locator('[data-testid*="section"], section[aria-label]').count();
-    const effectiveSections = sectionCount > 0 ? sectionCount : 1;
+    if (doPost) {
+      const postResult = await runPosts(page, {
+        message,
+        gifFilePath,
+        repeat: count
+      });
+      detectedSections = postResult.detectedSections;
+      logs.push(...postResult.logs);
+    }
 
-    for (let s = 0; s < effectiveSections; s++) {
-      const sectionName = `Section ${s + 1}`;
-      for (let i = 1; i <= count; i++) {
-        try {
-          await createPadletPost(page, {
-            sectionIndex: s,
-            totalSections: effectiveSections,
-            message,
-            gifUrl
-          });
-          logs.push({
-            section: sectionName,
-            attempt: i,
-            status: "ok",
-            detail: "投稿完了",
-            timestamp: new Date().toISOString()
-          });
-        } catch (stepErr) {
-          logs.push({
-            section: sectionName,
-            attempt: i,
-            status: "error",
-            detail: stepErr && stepErr.message ? stepErr.message.split("\n")[0] : "投稿処理失敗",
-            timestamp: new Date().toISOString()
-          });
-        }
-        await sleep(800);
+    if (doComment) {
+      if (doPost) {
+        // 投稿後にコメントも行う場合は少し待ってからボード全体へコメント
+        await sleep(2000);
       }
+      const commentResult = await runComments(page, {
+        message,
+        maxComments: 50
+      });
+      logs.push(...commentResult.logs);
     }
 
     await browser.close();
@@ -261,7 +209,9 @@ app.post("/run", async (req, res) => {
 
     return res.json({
       ok: true,
-      detectedSections: effectiveSections,
+      enablePost: doPost,
+      enableComment: doComment,
+      detectedSections,
       cookiesLoaded: cookies.length,
       totalSteps: logs.length,
       successCount,
@@ -278,6 +228,12 @@ app.post("/run", async (req, res) => {
       error: err && err.message ? err.message : "Playwright実行中にエラーが発生しました。",
       logs
     });
+  } finally {
+    if (gifFilePath && fs.existsSync(gifFilePath)) {
+      try {
+        fs.unlinkSync(gifFilePath);
+      } catch (_) {}
+    }
   }
 });
 
