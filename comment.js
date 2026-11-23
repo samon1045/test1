@@ -1,9 +1,9 @@
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function findCommentInput(page, timeoutMs = 4000) {
+async function findCommentInput(page, timeoutMs = 5500) {
   const start = Date.now();
   const selector =
-    'textarea, input[type="text"], div[contenteditable="true"], [role="textbox"]';
+    'textarea, input:not([type="hidden"]):not([type="file"]):not([type="checkbox"]):not([type="radio"]), div[contenteditable="true"], [role="textbox"]';
 
   while (Date.now() - start < timeoutMs) {
     const loc = page.locator(selector);
@@ -12,10 +12,14 @@ async function findCommentInput(page, timeoutMs = 4000) {
       const item = loc.nth(i);
       const visible = await item.isVisible().catch(() => false);
       if (visible) {
-        return item;
+        const box = await item.boundingBox().catch(() => null);
+        // 画面上部の検索バー（y < 80）は除外
+        if (box && box.width > 40 && box.height > 15 && box.y > 80) {
+          return item;
+        }
       }
     }
-    await sleep(250);
+    await sleep(300);
   }
   return null;
 }
@@ -63,10 +67,8 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
           const a = (el.getAttribute("aria-label") || "").toLowerCase();
           const p = (el.getAttribute("placeholder") || "").toLowerCase();
           const isMatch =
-            t === "Add comment" ||
-            t === "コメントを追加" ||
-            t.includes("Add comment") ||
             t.includes("コメントを追加") ||
+            t.includes("Add comment") ||
             a.includes("add comment") ||
             a.includes("comment") ||
             p.includes("comment") ||
@@ -75,11 +77,12 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
           if (isMatch && rect.width > 0 && rect.height > 0 && el.children.length <= 4) {
             el.scrollIntoView({ behavior: "instant", block: "center" });
             el.click();
-            return { found: true, postId, label: postId };
+            return { found: true, postId, label: postId, cardClicked: false };
           }
         }
       }
 
+      // 「コメントを追加」要素がカード外や別構造にある場合のフォールバック
       const allTriggers = Array.from(document.querySelectorAll('button, [role="button"], span, div, a'));
       for (let i = 0; i < allTriggers.length; i++) {
         const el = allTriggers[i];
@@ -88,10 +91,8 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
         const t = (el.innerText || "").trim();
         const a = (el.getAttribute("aria-label") || "").toLowerCase();
         const isMatch =
-          t === "Add comment" ||
-          t === "コメントを追加" ||
-          t.includes("Add comment") ||
           t.includes("コメントを追加") ||
+          t.includes("Add comment") ||
           a.includes("add comment");
 
         if (isMatch && rect.width > 0 && rect.height > 0 && el.children.length <= 3) {
@@ -100,11 +101,11 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
           el.dataset.samonCommented = "1";
           el.scrollIntoView({ behavior: "instant", block: "center" });
           el.click();
-          return { found: true, postId: fallbackId, label: fallbackId };
+          return { found: true, postId: fallbackId, label: fallbackId, cardClicked: false };
         }
       }
 
-      return { found: false, postId: null, label: null };
+      return { found: false, postId: null, label: null, cardClicked: false };
     }, Array.from(processedPostIds));
 
     if (!targetInfo.found) {
@@ -131,11 +132,25 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
     stagnantRounds = 0;
     processedPostIds.add(targetInfo.postId);
     postIndex++;
-    await sleep(700);
+    await sleep(1000);
 
     for (let r = 1; r <= repeatPerPost; r++) {
       try {
-        const editor = await findCommentInput(page, 3500);
+        let editor = await findCommentInput(page, 4000);
+
+        // 見つからない場合、投稿カード自体をクリックして詳細/コメント欄が開くか試す
+        if (!editor && r === 1) {
+          await page.evaluate((pid) => {
+            const card = document.querySelector(`[data-samon-post-id="${pid}"]`);
+            if (card) {
+              card.scrollIntoView({ behavior: "instant", block: "center" });
+              card.click();
+            }
+          }, targetInfo.postId);
+          await sleep(1000);
+          editor = await findCommentInput(page, 3500);
+        }
+
         if (!editor) {
           await page.keyboard.press("Escape").catch(() => {});
           logs.push({
@@ -152,7 +167,7 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
         await editor.scrollIntoViewIfNeeded().catch(() => {});
         await editor.click();
         await editor.fill(textToComment);
-        await sleep(400);
+        await sleep(450);
 
         const sentByButton = await page.evaluate(() => {
           const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
@@ -192,7 +207,7 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
           timestamp: new Date().toISOString()
         });
 
-        await sleep(1000);
+        await sleep(1100);
       } catch (err) {
         logs.push({
           type: "comment",
