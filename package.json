@@ -1,0 +1,13 @@
+{
+  "name": "samon-padlet-runner",
+  "version": "1.0.0",
+  "description": "Node.js backend for Samon PowerShell Padlet runner",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "cors": "^2.8.5"
+  }
+}
