@@ -1,6 +1,26 @@
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function runComments(page, { message, commentMessage, commentRepeat = 1, maxPosts = 50 }) {
+async function findCommentInput(page, timeoutMs = 4000) {
+  const start = Date.now();
+  const selector =
+    'textarea, input[type="text"], div[contenteditable="true"], [role="textbox"]';
+
+  while (Date.now() - start < timeoutMs) {
+    const loc = page.locator(selector);
+    const count = await loc.count();
+    for (let i = count - 1; i >= 0; i--) {
+      const item = loc.nth(i);
+      const visible = await item.isVisible().catch(() => false);
+      if (visible) {
+        return item;
+      }
+    }
+    await sleep(250);
+  }
+  return null;
+}
+
+async function runComments(page, { message, commentMessage, commentRepeat = 1, maxPosts = 30 }) {
   const logs = [];
   const textToComment = (commentMessage && commentMessage.trim()) || message || "test";
   const repeatPerPost = Math.max(1, Math.min(10, Number(commentRepeat) || 1));
@@ -35,7 +55,7 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
         if (doneSet.has(postId)) continue;
 
         const triggers = Array.from(
-          card.querySelectorAll('button, [role="button"], span, div, input, textarea')
+          card.querySelectorAll('button, [role="button"], span, div, input, textarea, a')
         );
         for (const el of triggers) {
           const rect = el.getBoundingClientRect();
@@ -52,7 +72,7 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
             p.includes("comment") ||
             p.includes("コメント");
 
-          if (isMatch && rect.width > 0 && rect.height > 0 && el.children.length <= 3) {
+          if (isMatch && rect.width > 0 && rect.height > 0 && el.children.length <= 4) {
             el.scrollIntoView({ behavior: "instant", block: "center" });
             el.click();
             return { found: true, postId, label: postId };
@@ -60,7 +80,7 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
         }
       }
 
-      const allTriggers = Array.from(document.querySelectorAll('button, [role="button"], span, div'));
+      const allTriggers = Array.from(document.querySelectorAll('button, [role="button"], span, div, a'));
       for (let i = 0; i < allTriggers.length; i++) {
         const el = allTriggers[i];
         if (el.dataset.samonCommented === "1") continue;
@@ -74,7 +94,7 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
           t.includes("コメントを追加") ||
           a.includes("add comment");
 
-        if (isMatch && rect.width > 0 && rect.height > 0 && el.children.length <= 2) {
+        if (isMatch && rect.width > 0 && rect.height > 0 && el.children.length <= 3) {
           const fallbackId = `trigger-${i + 1}`;
           if (doneSet.has(fallbackId)) continue;
           el.dataset.samonCommented = "1";
@@ -111,13 +131,13 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
     stagnantRounds = 0;
     processedPostIds.add(targetInfo.postId);
     postIndex++;
-    await sleep(900);
+    await sleep(700);
 
     for (let r = 1; r <= repeatPerPost; r++) {
       try {
-        const editor = page.locator('div[contenteditable="true"], textarea, input[type="text"]').last();
-        if ((await editor.count()) === 0) {
-          await page.keyboard.press("Escape");
+        const editor = await findCommentInput(page, 3500);
+        if (!editor) {
+          await page.keyboard.press("Escape").catch(() => {});
           logs.push({
             type: "comment",
             section: targetInfo.label,
@@ -129,6 +149,7 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
           break;
         }
 
+        await editor.scrollIntoViewIfNeeded().catch(() => {});
         await editor.click();
         await editor.fill(textToComment);
         await sleep(400);
@@ -145,7 +166,7 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
               (t === "コメント" ||
                 t === "Comment" ||
                 t === "送信" ||
-                t.includes("コメント") ||
+                t === "Send" ||
                 a.includes("send") ||
                 a.includes("submit comment") ||
                 a.includes("送信"))
@@ -171,7 +192,7 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
           timestamp: new Date().toISOString()
         });
 
-        await sleep(1100);
+        await sleep(1000);
       } catch (err) {
         logs.push({
           type: "comment",
