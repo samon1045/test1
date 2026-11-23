@@ -276,7 +276,7 @@ app.post("/run", async (req, res) => {
       if (savedPath && fs.existsSync(savedPath)) {
         const stat = fs.statSync(savedPath);
         // 巨大すぎる動画でレスポンスが肥大化するのを防ぐ（約8MBまで）
-        if (stat.size > 0 && stat.size <= 8 * 1024 * 1024) {
+        if (stat.size > 0 && stat.size <= 25 * 1024 * 1024) {
           const buf = fs.readFileSync(savedPath);
           videoBase64 = buf.toString("base64");
           videoFileName = `samon_run_${Date.now()}.webm`;
