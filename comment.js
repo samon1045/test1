@@ -5,8 +5,32 @@ async function setEditableValue(locator, text) {
   await locator.fill(text);
 }
 
+async function waitForCommentTargets(page, timeoutMs = 15000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const found = await page.evaluate(() => {
+      const allEls = Array.from(document.querySelectorAll('button, [role="button"], span, div, a'));
+      return allEls.some((el) => {
+        const rect = el.getBoundingClientRect();
+        const t = (el.innerText || "").trim();
+        const a = (el.getAttribute("aria-label") || "").toLowerCase();
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          (t.includes("Add comment") ||
+            t.includes("コメントを追加") ||
+            a.includes("add comment") ||
+            a.includes("comment"))
+        );
+      });
+    });
+    if (found) return true;
+    await sleep(1000);
+  }
+  return false;
+}
+
 async function clickCommentSubmitButton(page) {
-  // 1. テキストが「コメント」「Comment」「送信」「Send」のボタンをPlaywrightのLocatorで探してクリック
   const buttonTexts = ["コメント", "Comment", "送信", "Send"];
   for (const label of buttonTexts) {
     const btn = page
@@ -23,7 +47,6 @@ async function clickCommentSubmitButton(page) {
     }
   }
 
-  // 2. aria-label 等から送信系ボタンを探索
   const clickedByEval = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
     for (let i = buttons.length - 1; i >= 0; i--) {
@@ -52,7 +75,6 @@ async function clickCommentSubmitButton(page) {
 
   if (clickedByEval) return true;
 
-  // 3. 最終手段として Enter キー
   await page.keyboard.press("Enter");
   return true;
 }
@@ -62,6 +84,8 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
   const textToComment = (commentMessage && commentMessage.trim()) || message || "test";
   const repeatPerPost = Math.max(1, Math.min(5, Number(commentRepeat) || 1));
   let sentCount = 0;
+
+  await waitForCommentTargets(page, 15000);
 
   for (let i = 0; i < maxPosts; i++) {
     const opened = await page.evaluate(() => {
@@ -149,7 +173,6 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
       }
     }
 
-    // 詳細パネルが開いたまま次のカードクリックを邪魔しないよう、開いていれば閉じる
     await page.keyboard.press("Escape").catch(() => {});
     await sleep(400);
   }
