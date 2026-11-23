@@ -125,7 +125,7 @@ async function setEditableValueExact(locator, text) {
   await locator.fill(text, { timeout: 4000 });
 }
 
-async function waitForPostEditor(page, shouldStop, maxWaitMs = 5000) {
+async function waitForPostEditor(page, shouldStop, maxWaitMs = 6000) {
   const selector = 'div[contenteditable="true"], textarea, input[type="text"]';
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
@@ -221,17 +221,49 @@ async function inspectSections(page) {
     .catch(() => ({ sections: [] }));
 }
 
-async function clickAddButtonForSection(page, secIdx, sectionObj) {
-  const sectionTitle = sectionObj && sectionObj.title ? sectionObj.title : `セクション${secIdx + 1}`;
-  const targetCenterX = sectionObj && typeof sectionObj.centerX === "number" ? sectionObj.centerX : null;
+function isSectionCreationButton(btn) {
+  const t = (btn.innerText || "").trim().toLowerCase();
+  const a = (btn.getAttribute("aria-label") || "").toLowerCase();
+  const title = (btn.getAttribute("title") || "").toLowerCase();
+  const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
+  const combined = `${t} ${a} ${title} ${testid}`;
 
-  const result = await page
-    .evaluate(({ idx, title, centerX }) => {
+  return (
+    combined.includes("セクションを追加") ||
+    combined.includes("add section") ||
+    combined.includes("new section") ||
+    combined.includes("create section") ||
+    combined.includes("section")
+  );
+}
+
+async function clickAddButtonForSection(page, secIdx, sectionObj) {
+  const targetCenterX =
+    sectionObj && typeof sectionObj.centerX === "number" ? sectionObj.centerX : null;
+
+  return page
+    .evaluate(({ idx, centerX }) => {
       const allBtns = Array.from(
         document.querySelectorAll('button, [role="button"], [data-testid*="add"]')
       );
 
-      const isAddLike = (btn) => {
+      const isSectionCreate = (btn) => {
+        const t = (btn.innerText || "").trim().toLowerCase();
+        const a = (btn.getAttribute("aria-label") || "").toLowerCase();
+        const title = (btn.getAttribute("title") || "").toLowerCase();
+        const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
+        const combined = `${t} ${a} ${title} ${testid}`;
+        return (
+          combined.includes("セクションを追加") ||
+          combined.includes("add section") ||
+          combined.includes("new section") ||
+          combined.includes("create section") ||
+          combined.includes("section")
+        );
+      };
+
+      const isPostAddLike = (btn) => {
+        if (isSectionCreate(btn)) return false;
         const r = btn.getBoundingClientRect();
         if (r.width <= 0 || r.height <= 0) return false;
         const t = (btn.innerText || "").trim();
@@ -239,85 +271,56 @@ async function clickAddButtonForSection(page, secIdx, sectionObj) {
         const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
         return (
           t === "+" ||
+          t.includes("投稿") ||
           t.includes("Add") ||
           t.includes("追加") ||
           a.includes("add") ||
+          a.includes("post") ||
           a.includes("追加") ||
-          testid.includes("add")
+          a.includes("投稿") ||
+          testid.includes("add") ||
+          testid.includes("post")
         );
       };
 
+      // 1. セクション列のX座標付近にある投稿追加ボタンを探す
       if (centerX !== null) {
         const columnPlusBtns = allBtns
           .filter((btn) => {
-            if (!isAddLike(btn)) return false;
+            if (!isPostAddLike(btn)) return false;
             const r = btn.getBoundingClientRect();
             const bx = r.left + r.width / 2;
-            return Math.abs(bx - centerX) < 220 && r.y > 40 && r.y < window.innerHeight - 80;
+            return Math.abs(bx - centerX) < 220 && r.y > 40 && r.y < window.innerHeight - 60;
           })
           .sort((a, b) => {
             const ra = a.getBoundingClientRect();
             const rb = b.getBoundingClientRect();
-            return Math.abs(ra.left + ra.width / 2 - centerX) - Math.abs(rb.left + rb.width / 2 - centerX);
+            return (
+              Math.abs(ra.left + ra.width / 2 - centerX) -
+              Math.abs(rb.left + rb.width / 2 - centerX)
+            );
           });
 
         if (columnPlusBtns.length > 0) {
           const target = columnPlusBtns[0];
           target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
           target.click();
-          return { clicked: true, mode: "column-plus" };
+          return true;
         }
       }
 
-      const generalBtns = allBtns.filter((btn) => {
-        const r = btn.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0) return false;
-        const t = (btn.innerText || "").trim();
-        const a = (btn.getAttribute("aria-label") || "").toLowerCase();
-        const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
-        return (
-          isAddLike(btn) ||
-          t.includes("投稿") ||
-          a.includes("post") ||
-          a.includes("投稿") ||
-          testid.includes("post")
-        );
-      });
-
+      // 2. 画面全体の投稿追加ボタン（+ 投稿 など）を探す
+      const generalBtns = allBtns.filter((btn) => isPostAddLike(btn));
       if (generalBtns.length === 0) {
-        return { clicked: false, mode: "none" };
+        return false;
       }
 
       const target = generalBtns.length > 1 && generalBtns[idx] ? generalBtns[idx] : generalBtns[0];
       target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
       target.click();
-      return { clicked: true, mode: "general", title };
-    }, { idx: secIdx, title: sectionTitle, centerX: targetCenterX })
-    .catch(() => ({ clicked: false, mode: "error" }));
-
-  if (!result || !result.clicked) return false;
-
-  await sleep(500);
-  await page
-    .evaluate((targetTitle) => {
-      const items = Array.from(
-        document.querySelectorAll('button, [role="button"], [role="option"], li, div, span')
-      );
-      for (const el of items) {
-        const r = el.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0) continue;
-        const t = (el.innerText || "").trim();
-        if (t === targetTitle) {
-          const clickable = el.closest('button, [role="button"], [role="option"], li') || el;
-          clickable.click();
-          return true;
-        }
-      }
-      return false;
-    }, sectionTitle)
+      return true;
+    }, { idx: secIdx, centerX: targetCenterX })
     .catch(() => false);
-
-  return true;
 }
 
 process.on("unhandledRejection", (reason) => {
@@ -408,7 +411,9 @@ app.post("/run", async (req, res) => {
   let stoppedByUser = false;
 
   const videoDir = doVideo ? fs.mkdtempSync(path.join(os.tmpdir(), "padlet_rec_")) : null;
-  console.log(`[RUN START] jobId=${jobId} rounds=${totalRounds} post=${doPost} comment=${doComment} video=${doVideo}`);
+  console.log(
+    `[RUN START] jobId=${jobId} rounds=${totalRounds} post=${doPost} comment=${doComment} video=${doVideo}`
+  );
 
   try {
     browser = await chromium.launch({
@@ -478,7 +483,10 @@ app.post("/run", async (req, res) => {
               break;
             }
 
-            const secObj = sectionList[secIdx] || { title: `セクション${secIdx + 1}`, centerX: null };
+            const secObj = sectionList[secIdx] || {
+              title: `セクション${secIdx + 1}`,
+              centerX: null
+            };
             const sectionName = `Section ${secIdx + 1}`;
             try {
               await page.keyboard.press("Escape").catch(() => {});
@@ -497,7 +505,7 @@ app.post("/run", async (req, res) => {
                 continue;
               }
 
-              const editables = await waitForPostEditor(page, shouldStop, 5000);
+              const editables = await waitForPostEditor(page, shouldStop, 6000);
               if (shouldStop()) {
                 stoppedByUser = true;
                 break;
@@ -724,7 +732,10 @@ app.post("/run", async (req, res) => {
                 section: `round-${roundNum}/post-${i + 1}`,
                 attempt: 1,
                 status: "error",
-                detail: commentErr && commentErr.message ? commentErr.message.split("\n")[0] : "コメントエラー",
+                detail:
+                  commentErr && commentErr.message
+                    ? commentErr.message.split("\n")[0]
+                    : "コメントエラー",
                 timestamp: new Date().toISOString()
               });
               break;
