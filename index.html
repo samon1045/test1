@@ -80,7 +80,7 @@
   </div>
 
   <script>
-    const STORAGE_KEY = "samon_ps_padlet_state_v5";
+    const STORAGE_KEY = "samon_ps_padlet_state_v7";
     const RENDER_BASE_URL = "https://test1-1-qyfl.onrender.com/";
 
     const outputEl = document.getElementById("output");
@@ -93,7 +93,6 @@
       roomUrl: "",
       message: "",
       commentMessage: "",
-      gifUrl: "",
       cookie: "",
       repeat: 1,
       commentRepeat: 1,
@@ -290,7 +289,6 @@
         appendLine("Comment Msg    : " + (state.commentMessage || state.message || "(未設定)"), "gray");
         appendLine("Comment Repeat : " + state.commentRepeat + " 回/投稿", "gray");
       }
-      appendLine("GIF URL        : " + (state.gifUrl || "(未設定)"), "gray");
       if (state.enablePost) {
         appendLine("Repeat         : " + state.repeat + " 回/セクション", "gray");
       }
@@ -320,7 +318,6 @@
             roomUrl: state.roomUrl,
             message: state.message,
             commentMessage: state.commentMessage,
-            gifUrl: state.gifUrl,
             cookie: state.cookie,
             repeat: state.repeat,
             commentRepeat: state.commentRepeat,
@@ -452,7 +449,6 @@
         appendLine("  set-msg <TEXT>         投稿用メッセージを設定");
         appendLine("  set-cmsg <TEXT>        コメント用メッセージを設定（未設定時は投稿msgを使用）");
         appendLine("  set-crepeat <NUM>      1投稿あたりのコメント繰り返し回数を設定（1〜10、既定: 1）");
-        appendLine("  set-gif <URL>          GIF画像URLを設定");
         appendLine("  set-cookie <VALUE>     Cookie（JSON配列または key=val 文字列）を設定");
         appendLine("  clear-cookie           保存済みCookieを削除");
         appendLine("  set-repeat <NUM>       1セクションあたりの投稿繰り返し回数を設定（1〜10、既定: 1）");
@@ -486,7 +482,6 @@
         appendLine("  message       : " + (state.message || "(未設定)"));
         appendLine("  commentMsg    : " + (state.commentMessage || "(未設定 -> messageを使用)"));
         appendLine("  commentRepeat : " + state.commentRepeat);
-        appendLine("  gifUrl        : " + (state.gifUrl || "(未設定)"));
         appendLine("  cookie        : " + (state.cookie ? `設定済み (${state.cookie.length} 文字)` : "(未設定)"));
         appendLine("  repeat        : " + state.repeat);
         appendLine("");
@@ -576,13 +571,6 @@
         state.commentRepeat = n;
         saveState();
         appendLine("commentRepeat を " + n + " に設定しました。", "green");
-        return;
-      }
-
-      if (cmd === "set-gif") {
-        state.gifUrl = stripOuterQuotes(tokens[1] || argText);
-        saveState();
-        appendLine("gifUrl を更新しました: " + state.gifUrl, "green");
         return;
       }
 
