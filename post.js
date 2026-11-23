@@ -1,35 +1,26 @@
 const fs = require("fs");
+const path = require("path");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function isLikelyImageFile(filePath) {
-  if (!filePath || !fs.existsSync(filePath)) return false;
-  try {
-    const fd = fs.openSync(filePath, "r");
-    const buf = Buffer.alloc(12);
-    const bytesRead = fs.readSync(fd, buf, 0, 12, 0);
-    fs.closeSync(fd);
-    if (bytesRead < 4) return false;
+function resolveRepoGifPath(gifUrl = "") {
+  const candidates = [
+    path.join(__dirname, "_______ (3).gif"),
+    path.join(__dirname, "_______.gif"),
+    path.join(__dirname, "image.gif")
+  ];
 
-    const headerStr = buf.toString("ascii", 0, 6);
-    // GIF87a / GIF89a
-    if (headerStr === "GIF87a" || headerStr === "GIF89a") return true;
-    // PNG: 89 50 4E 47
-    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return true;
-    // JPEG: FF D8 FF
-    if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true;
-    // WEBP: RIFF....WEBP
-    if (
-      buf.toString("ascii", 0, 4) === "RIFF" &&
-      bytesRead >= 12 &&
-      buf.toString("ascii", 8, 12) === "WEBP"
-    ) {
-      return true;
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      return p;
     }
-    return false;
-  } catch (_) {
-    return false;
   }
+
+  if (gifUrl && fs.existsSync(gifUrl)) {
+    return gifUrl;
+  }
+
+  return null;
 }
 
 async function dismissUploadErrorDialog(page) {
@@ -46,7 +37,11 @@ async function dismissUploadErrorDialog(page) {
     const cancelBtn = btns.find((b) => {
       const r = b.getBoundingClientRect();
       const t = (b.innerText || "").trim();
-      return r.width > 0 && r.height > 0 && (t === "キャンセル" || t.includes("キャンセル") || t.toLowerCase().includes("cancel"));
+      return (
+        r.width > 0 &&
+        r.height > 0 &&
+        (t === "キャンセル" || t.includes("キャンセル") || t.toLowerCase().includes("cancel"))
+      );
     });
 
     if (cancelBtn) {
@@ -64,154 +59,118 @@ async function dismissUploadErrorDialog(page) {
 
 async function detectSections(page) {
   return page.evaluate(() => {
-    const addButtons = Array.from(document.querySelectorAll('button, [role="button"]')).filter((el) => {
-      const rect = el.getBoundingClientRect();
-      const text = (el.innerText || "").trim();
-      const aria = (el.getAttribute("aria-label") || "").toLowerCase();
-      const isRightBottomFab = rect.x > window.innerWidth * 0.82 && rect.y > window.innerHeight * 0.78;
-      if (isRightBottomFab || rect.width <= 0 || rect.height <= 0) return false;
-      if (rect.y < 100 || rect.y > 480) return false;
-      return (
-        text === "+" ||
-        aria.includes("add post") ||
-        aria.includes("投稿を追加")
-      );
-    });
-
-    addButtons.sort((a, b) => a.getBoundingClientRect().x - b.getBoundingClientRect().x);
-    return addButtons.length;
+    const addBtns = Array.from(
+      document.querySelectorAll('button, [role="button"], [data-testid*="add"]')
+    );
+    let count = 0;
+    for (const btn of addBtns) {
+      const rect = btn.getBoundingClientRect();
+      const text = (btn.innerText || "").trim();
+      const aria = btn.getAttribute("aria-label") || "";
+      const cls = typeof btn.className === "string" ? btn.className : "";
+      if (
+        (text === "+" || aria.includes("Add") || aria.includes("追加") || cls.includes("add")) &&
+        rect.y > 0 &&
+        rect.y < 420 &&
+        rect.width > 0
+      ) {
+        count++;
+      }
+    }
+    return count;
   });
 }
 
 async function clickSectionAddButton(page, targetIdx) {
   return page.evaluate((idx) => {
-    const addButtons = Array.from(document.querySelectorAll('button, [role="button"]')).filter((el) => {
-      const rect = el.getBoundingClientRect();
-      const text = (el.innerText || "").trim();
-      const aria = (el.getAttribute("aria-label") || "").toLowerCase();
-      const isRightBottomFab = rect.x > window.innerWidth * 0.82 && rect.y > window.innerHeight * 0.78;
-      if (isRightBottomFab || rect.width <= 0 || rect.height <= 0) return false;
-      if (rect.y < 100 || rect.y > 480) return false;
-      return (
-        text === "+" ||
-        aria.includes("add post") ||
-        aria.includes("投稿を追加")
-      );
-    });
-
-    addButtons.sort((a, b) => a.getBoundingClientRect().x - b.getBoundingClientRect().x);
-
-    if (idx < addButtons.length) {
-      const btn = addButtons[idx];
-      btn.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
-      btn.click();
-      return true;
+    const addBtns = Array.from(
+      document.querySelectorAll('button, [role="button"], [data-testid*="add"]')
+    );
+    let count = 0;
+    for (const btn of addBtns) {
+      const rect = btn.getBoundingClientRect();
+      const text = (btn.innerText || "").trim();
+      const aria = btn.getAttribute("aria-label") || "";
+      const cls = typeof btn.className === "string" ? btn.className : "";
+      if (
+        (text === "+" || aria.includes("Add") || aria.includes("追加") || cls.includes("add")) &&
+        rect.y > 0 &&
+        rect.y < 420 &&
+        rect.width > 0
+      ) {
+        if (count === targetIdx) {
+          btn.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+          btn.click();
+          return true;
+        }
+        count++;
+      }
     }
     return false;
   }, targetIdx);
 }
 
-async function waitForPostInputs(page, timeoutMs = 5000) {
-  const start = Date.now();
-  const locator = page.locator('div[contenteditable="true"], textarea, input[type="text"], [role="textbox"]');
-  while (Date.now() - start < timeoutMs) {
-    const count = await locator.count();
-    if (count > 0) {
-      return locator;
-    }
-    await sleep(250);
-  }
-  return null;
+async function setEditableValue(locator, text) {
+  await locator.click();
+  await locator.fill(text);
 }
 
-async function attachGifToComposer(page, gifFilePath) {
-  if (!isLikelyImageFile(gifFilePath)) {
+async function attachLocalGif(page, gifPath) {
+  if (!gifPath || !fs.existsSync(gifPath)) return;
+
+  try {
+    const fileInput = page.locator('input[type="file"]').first();
+    if ((await fileInput.count()) > 0) {
+      await fileInput.setInputFiles(gifPath, { timeout: 6000 });
+      await sleep(2200);
+      await dismissUploadErrorDialog(page);
+    }
+  } catch (_) {
+    await dismissUploadErrorDialog(page).catch(() => {});
+  }
+}
+
+async function clickPublishButton(page) {
+  await dismissUploadErrorDialog(page);
+
+  const pubClicked = await page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+    for (const b of buttons) {
+      const t = (b.innerText || "").trim();
+      const a = (b.getAttribute("aria-label") || "").toLowerCase();
+      const testid = (b.getAttribute("data-testid") || "").toLowerCase();
+      const cls = typeof b.className === "string" ? b.className : "";
+      const rect = b.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0 && rect.x > window.innerWidth / 2) {
+        if (
+          t.includes("公開") ||
+          t.includes("Publish") ||
+          t.includes("送信") ||
+          a.includes("publish") ||
+          a.includes("submit") ||
+          a.includes("send") ||
+          testid.includes("publish") ||
+          testid.includes("submit") ||
+          cls.includes("primary") ||
+          cls.includes("submit")
+        ) {
+          b.click();
+          return true;
+        }
+      }
+    }
     return false;
-  }
-
-  let uploaded = false;
-  const fileInputs = page.locator('input[type="file"]');
-  if ((await fileInputs.count()) > 0) {
-    try {
-      await fileInputs.last().setInputFiles(gifFilePath, { timeout: 5000 });
-      uploaded = true;
-    } catch (_) {}
-  }
-
-  // アップロード完了またはエラーダイアログ出現を最大6秒監視
-  const start = Date.now();
-  while (Date.now() - start < 6000) {
-    const hadError = await dismissUploadErrorDialog(page);
-    if (hadError) {
-      return false;
-    }
-    const stillUploading = await page.evaluate(() => {
-      const txt = document.body ? document.body.innerText || "" : "";
-      return txt.includes("アップロードしています");
-    });
-    if (uploaded && !stillUploading && Date.now() - start > 1500) {
-      break;
-    }
-    await sleep(400);
-  }
-
-  await dismissUploadErrorDialog(page);
-  return uploaded;
-}
-
-async function clickPublishAndEnsureClosed(page) {
-  await dismissUploadErrorDialog(page);
-
-  const clicked = await page.evaluate(() => {
-    const candidates = Array.from(document.querySelectorAll('button, [role="button"]')).filter((el) => {
-      const rect = el.getBoundingClientRect();
-      const text = (el.innerText || "").trim();
-      const aria = (el.getAttribute("aria-label") || "").toLowerCase();
-      return (
-        rect.width > 0 &&
-        rect.height > 0 &&
-        (text === "公開" ||
-          text.includes("公開") ||
-          text.includes("Publish") ||
-          aria.includes("publish"))
-      );
-    });
-
-    if (candidates.length === 0) return false;
-    candidates.sort((a, b) => b.getBoundingClientRect().x - a.getBoundingClientRect().x);
-    candidates[0].click();
-    return true;
   });
 
-  if (!clicked) {
+  if (!pubClicked) {
     await page.keyboard.press("Control+Enter");
   }
 
-  await sleep(2200);
+  await sleep(2500);
   await dismissUploadErrorDialog(page);
-
-  await page.evaluate(() => {
-    const closeBtns = Array.from(document.querySelectorAll('button, [role="button"]')).filter((el) => {
-      const r = el.getBoundingClientRect();
-      const t = (el.innerText || "").trim();
-      const a = (el.getAttribute("aria-label") || "").toLowerCase();
-      return (
-        r.width > 0 &&
-        r.height > 0 &&
-        r.x > window.innerWidth * 0.5 &&
-        r.y < window.innerHeight * 0.45 &&
-        (t === "×" || t === "✕" || a.includes("close") || a.includes("閉じる"))
-      );
-    });
-    if (closeBtns.length > 0) {
-      closeBtns[0].click();
-    }
-  });
-
-  await sleep(600);
 }
 
-async function createSinglePost(page, { sectionIndex, totalSections, message, gifFilePath }) {
+async function createSinglePost(page, { sectionIndex, totalSections, titleMessage, customMessage, gifPath }) {
   await dismissUploadErrorDialog(page);
 
   let clickedAdd = false;
@@ -220,77 +179,50 @@ async function createSinglePost(page, { sectionIndex, totalSections, message, gi
   }
 
   if (!clickedAdd) {
-    clickedAdd = await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
-      for (const b of btns) {
-        const rect = b.getBoundingClientRect();
-        const t = (b.innerText || "").trim();
-        const a = (b.getAttribute("aria-label") || "").toLowerCase();
-        if (
-          rect.width > 0 &&
-          rect.height > 0 &&
-          (t.includes("投稿") || t === "+" || a.includes("create post") || a.includes("add post"))
-        ) {
-          b.click();
-          return true;
-        }
-      }
-      return false;
-    });
-  }
-
-  if (!clickedAdd) {
     throw new Error("投稿追加ボタンが見つかりませんでした");
   }
 
-  let editables = await waitForPostInputs(page, 5000);
+  await sleep(1500);
 
-  if (!editables && totalSections > 0) {
-    await clickSectionAddButton(page, sectionIndex);
-    editables = await waitForPostInputs(page, 3500);
-  }
-
-  if (!editables) {
+  const editables = page.locator('div[contenteditable="true"], textarea, input[type="text"]');
+  const editableCount = await editables.count();
+  if (editableCount === 0) {
     throw new Error("投稿入力欄が見つかりませんでした");
   }
 
-  const editableCount = await editables.count();
-  const textToType = message || "test";
-  if (editableCount === 1) {
-    const target = editables.first();
-    await target.click();
-    await target.fill(textToType);
-  } else {
-    await editables.nth(0).click();
-    await editables.nth(0).fill(textToType);
-    await sleep(250);
-    await editables.nth(editableCount - 1).click();
-    await editables.nth(editableCount - 1).fill(textToType);
+  if (editableCount > 0) {
+    await setEditableValue(editables.nth(0), titleMessage);
+  }
+  if (editableCount > 1) {
+    await setEditableValue(editables.nth(1), customMessage);
   }
 
-  await sleep(500);
+  await sleep(700);
 
-  if (gifFilePath && fs.existsSync(gifFilePath)) {
-    await attachGifToComposer(page, gifFilePath);
+  if (gifPath) {
+    await attachLocalGif(page, gifPath);
   }
 
-  await clickPublishAndEnsureClosed(page);
+  await clickPublishButton(page);
 }
 
-async function runPosts(page, { message, gifFilePath, repeat }) {
+async function runPosts(page, { message, gifUrl, repeat }) {
   const logs = [];
   const detectedSections = await detectSections(page);
-  const effectiveSections = detectedSections > 0 ? detectedSections : 1;
+  const loopSections = Math.max(detectedSections, 1);
+  const gifPath = resolveRepoGifPath(gifUrl);
+  const textVal = message || "test";
 
-  for (let s = 0; s < effectiveSections; s++) {
-    const sectionName = `Section ${s + 1}`;
+  for (let secIdx = 0; secIdx < loopSections; secIdx++) {
+    const sectionName = `Section ${secIdx + 1}`;
     for (let i = 1; i <= repeat; i++) {
       try {
         await createSinglePost(page, {
-          sectionIndex: s,
+          sectionIndex: secIdx,
           totalSections: detectedSections,
-          message,
-          gifFilePath
+          titleMessage: textVal,
+          customMessage: textVal,
+          gifPath
         });
         logs.push({
           type: "post",
@@ -311,12 +243,12 @@ async function runPosts(page, { message, gifFilePath, repeat }) {
           timestamp: new Date().toISOString()
         });
       }
-      await sleep(700);
+      await sleep(800);
     }
   }
 
   return {
-    detectedSections: effectiveSections,
+    detectedSections: loopSections,
     logs
   };
 }
