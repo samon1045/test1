@@ -28,7 +28,7 @@ async function waitForCommentTargets(page, timeoutMs = 15000) {
 }
 
 async function openNextCommentTarget(page, processedKeys) {
-  return page.evaluate((doneKeys) => {
+  const targetInfo = await page.evaluate((doneKeys) => {
     const doneSet = new Set(doneKeys || []);
     const els = Array.from(document.querySelectorAll('button, [role="button"], a, span, div'));
 
@@ -55,7 +55,6 @@ async function openNextCommentTarget(page, processedKeys) {
       if (!looksLikeCommentTrigger) continue;
       if (el.children.length > 6) continue;
 
-      // クリック対象を最も内側のボタン/リンク/要素に寄せる
       const clickable =
         el.closest('button, [role="button"], a') &&
         el.closest('button, [role="button"], a').getBoundingClientRect().width > 0
@@ -76,83 +75,110 @@ async function openNextCommentTarget(page, processedKeys) {
       }
 
       clickable.dataset.samonCommentDone = "1";
-      clickable.scrollIntoView({ behavior: "instant", block: "center", inline: "nearest" });
+      clickable.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
 
-      try {
-        clickable.click();
-      } catch (_) {
-        clickable.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-      }
-
-      return { opened: true, key };
+      const updated = clickable.getBoundingClientRect();
+      return {
+        found: true,
+        key,
+        x: updated.left + updated.width / 2,
+        y: updated.top + updated.height / 2
+      };
     }
 
-    return { opened: false, key: null };
+    return { found: false, key: null, x: 0, y: 0 };
   }, Array.from(processedKeys));
-}
 
-async function findCommentInputLocator(page) {
-  // 画面上の表示中テキスト入力/contenteditable候補からコメント欄らしいものを優先取得
-  const candidates = page.locator(
-    'textarea:visible, div[contenteditable="true"]:visible, input[type="text"]:visible'
-  );
-  const count = await candidates.count();
-  if (count === 0) return null;
-
-  let bestIdx = -1;
-  let bestScore = -9999;
-
-  for (let i = 0; i < count; i++) {
-    const loc = candidates.nth(i);
-    const info = await loc
-      .evaluate((el) => {
-        const rect = el.getBoundingClientRect();
-        const ph = (el.getAttribute("placeholder") || "").toLowerCase();
-        const aria = (el.getAttribute("aria-label") || "").toLowerCase();
-        const containerText = (
-          el.closest('[role="dialog"], [class*="comment"], [class*="Comment"], form, aside, section, article')
-            ?.innerText || ""
-        ).toLowerCase();
-
-        const isCommentHint =
-          ph.includes("comment") ||
-          ph.includes("コメント") ||
-          aria.includes("comment") ||
-          aria.includes("コメント") ||
-          containerText.includes("add comment") ||
-          containerText.includes("コメントを追加") ||
-          containerText.includes("comments");
-
-        return {
-          y: rect.y,
-          area: rect.width * rect.height,
-          isCommentHint
-        };
-      })
-      .catch(() => null);
-
-    if (!info || info.area <= 0) continue;
-
-    let score = 0;
-    if (info.isCommentHint) score += 100;
-    // 画面下部・モーダル内にある入力欄をやや優先（後ろに出てきた要素ほどスコアを加算）
-    score += i * 5;
-    if (info.y > 120) score += 10;
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestIdx = i;
-    }
+  if (!targetInfo.found) {
+    return { opened: false, key: null };
   }
 
-  return bestIdx >= 0 ? candidates.nth(bestIdx) : candidates.nth(count - 1);
+  await sleep(250);
+  await page.mouse.move(targetInfo.x, targetInfo.y).catch(() => {});
+  await page.mouse.click(targetInfo.x, targetInfo.y).catch(() => {});
+
+  return { opened: true, key: targetInfo.key };
+}
+
+async function findCommentInputLocator(page, waitMs = 4500) {
+  const selector =
+    'textarea:visible, div[contenteditable="true"]:visible, input[type="text"]:visible, [role="textbox"]:visible';
+  const start = Date.now();
+
+  while (Date.now() - start < waitMs) {
+    const candidates = page.locator(selector);
+    const count = await candidates.count().catch(() => 0);
+
+    if (count > 0) {
+      let bestIdx = -1;
+      let bestScore = -9999;
+
+      for (let i = 0; i < count; i++) {
+        const loc = candidates.nth(i);
+        const info = await loc
+          .evaluate((el) => {
+            const rect = el.getBoundingClientRect();
+            const ph = (el.getAttribute("placeholder") || "").toLowerCase();
+            const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+            const dataPh = (el.getAttribute("data-placeholder") || "").toLowerCase();
+            const container = el.closest(
+              '[role="dialog"], [class*="comment"], [class*="Comment"], [class*="modal"], [class*="Modal"], form, aside'
+            );
+            const containerText = (container?.innerText || "").toLowerCase();
+            const isInDialogOrCommentBox = Boolean(container);
+
+            const isCommentHint =
+              ph.includes("comment") ||
+              ph.includes("コメント") ||
+              aria.includes("comment") ||
+              aria.includes("コメント") ||
+              dataPh.includes("comment") ||
+              dataPh.includes("コメント") ||
+              containerText.includes("add comment") ||
+              containerText.includes("コメントを追加") ||
+              containerText.includes("comments") ||
+              containerText.includes("コメント");
+
+            return {
+              y: rect.y,
+              area: rect.width * rect.height,
+              isCommentHint,
+              isInDialogOrCommentBox
+            };
+          })
+          .catch(() => null);
+
+        if (!info || info.area <= 0) continue;
+
+        let score = 0;
+        if (info.isCommentHint) score += 120;
+        if (info.isInDialogOrCommentBox) score += 50;
+        score += i * 5;
+        if (info.y > 100) score += 10;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = i;
+        }
+      }
+
+      if (bestIdx >= 0) {
+        return candidates.nth(bestIdx);
+      }
+      return candidates.nth(count - 1);
+    }
+
+    await sleep(300);
+  }
+
+  return null;
 }
 
 async function clickCommentSubmitButton(page) {
   const clickedByEval = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
     const exactLabels = new Set(["コメント", "comment", "送信", "send", "post", "投稿"]);
-    const partialHints = ["comment", "コメント", "send", "送信", "submit"];
+    const partialHints = ["comment", "コメント", "send", "送信", "submit", "post"];
 
     const scored = [];
 
@@ -167,7 +193,6 @@ async function clickCommentSubmitButton(page) {
       const a = (b.getAttribute("aria-label") || "").toLowerCase();
       const title = (b.getAttribute("title") || "").toLowerCase();
 
-      // 「コメントを追加」などの開くボタンは除外
       if (tl.includes("add comment") || t.includes("コメントを追加")) continue;
 
       let score = 0;
@@ -178,7 +203,7 @@ async function clickCommentSubmitButton(page) {
       }
 
       if (score > 0) {
-        score += i; // DOMの後ろ側（開いたコメントフォーム側）を優先
+        score += i;
         scored.push({ el: b, score });
       }
     }
@@ -199,6 +224,28 @@ async function clickCommentSubmitButton(page) {
 
   await page.keyboard.press("Enter").catch(() => {});
   return true;
+}
+
+async function closeCommentModalIfOpen(page) {
+  const closed = await page.evaluate(() => {
+    const dialog = document.querySelector('[role="dialog"]');
+    if (!dialog) return false;
+    const closeBtn = dialog.querySelector(
+      'button[aria-label*="close" i], button[aria-label*="閉じる" i], button[title*="close" i], button[title*="閉じる" i]'
+    );
+    if (closeBtn) {
+      closeBtn.click();
+      return true;
+    }
+    return false;
+  });
+
+  if (closed) {
+    await sleep(400);
+  } else {
+    await page.keyboard.press("Escape").catch(() => {});
+    await sleep(300);
+  }
 }
 
 async function runComments(page, { message, commentMessage, commentRepeat = 1, maxPosts = 25 }) {
@@ -232,12 +279,10 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
     }
     targetIndex++;
 
-    await sleep(1200);
-
     for (let r = 1; r <= repeatPerPost; r++) {
-      const editor = await findCommentInputLocator(page);
+      const editor = await findCommentInputLocator(page, 4500);
       if (!editor || (await editor.count()) === 0) {
-        await page.keyboard.press("Escape").catch(() => {});
+        await closeCommentModalIfOpen(page);
         logs.push({
           type: "comment",
           section: `post-${targetIndex}`,
@@ -276,11 +321,11 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
           }`,
           timestamp: new Date().toISOString()
         });
-        await page.keyboard.press("Escape").catch(() => {});
+        await closeCommentModalIfOpen(page);
       }
     }
 
-    await page.keyboard.press("Escape").catch(() => {});
+    await closeCommentModalIfOpen(page);
     await sleep(500);
   }
 
