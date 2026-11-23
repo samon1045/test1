@@ -1,6 +1,6 @@
 const { sleep, setEditableValue } = require("./utils");
 
-async function waitForCommentTargets(page, timeoutMs = 15000) {
+async function waitForCommentTargets(page, timeoutMs = 12000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const found = await page.evaluate(() => {
@@ -16,19 +16,20 @@ async function waitForCommentTargets(page, timeoutMs = 15000) {
           t.includes("コメントを追加") ||
           t === "コメント" ||
           t === "comments" ||
+          t === "comment" ||
           a.includes("comment") ||
           title.includes("comment")
         );
       });
     });
     if (found) return true;
-    await sleep(800);
+    await sleep(700);
   }
   return false;
 }
 
 async function openNextCommentTarget(page, processedKeys) {
-  const targetInfo = await page.evaluate((doneKeys) => {
+  const candidate = await page.evaluate((doneKeys) => {
     const doneSet = new Set(doneKeys || []);
     const els = Array.from(document.querySelectorAll('button, [role="button"], a, span, div'));
 
@@ -53,7 +54,9 @@ async function openNextCommentTarget(page, processedKeys) {
         title.includes("comment");
 
       if (!looksLikeCommentTrigger) continue;
-      if (el.children.length > 6) continue;
+
+      // 大きすぎるコンテナは除外（ボタン／リンク／ラベル相当に絞る）
+      if (rect.width > 420 || rect.height > 140) continue;
 
       const clickable =
         el.closest('button, [role="button"], a') &&
@@ -62,13 +65,20 @@ async function openNextCommentTarget(page, processedKeys) {
           : el;
 
       const r = clickable.getBoundingClientRect();
-      const key = `${Math.round(r.left / 16)}_${Math.round(r.top / 16)}_${(
+      if (r.width <= 0 || r.height <= 0) continue;
+
+      // テキスト／aria-labelベース＋相対位置で一意キーを作る
+      const labelPart = (
         clickable.innerText ||
         clickable.getAttribute("aria-label") ||
-        ""
+        clickable.getAttribute("title") ||
+        "comment"
       )
         .trim()
-        .slice(0, 24)}`;
+        .replace(/\s+/g, " ")
+        .slice(0, 28);
+
+      const key = `${labelPart}__${Math.round(r.left / 24)}_${Math.round(r.top / 24)}`;
 
       if (doneSet.has(key) || clickable.dataset.samonCommentDone === "1") {
         continue;
@@ -78,29 +88,87 @@ async function openNextCommentTarget(page, processedKeys) {
       clickable.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
 
       const updated = clickable.getBoundingClientRect();
+      const card =
+        clickable.closest('[data-testid*="post"], [class*="post"], [class*="card"], article') ||
+        clickable.parentElement?.parentElement ||
+        clickable.parentElement;
+      const cardRect = card ? card.getBoundingClientRect() : null;
+
       return {
         found: true,
         key,
         x: updated.left + updated.width / 2,
-        y: updated.top + updated.height / 2
+        y: updated.top + updated.height / 2,
+        cardCenter:
+          cardRect && cardRect.width > 0 && cardRect.height > 0
+            ? {
+                x: cardRect.left + Math.min(cardRect.width / 2, 140),
+                y: cardRect.top + Math.min(cardRect.height / 2, 90)
+              }
+            : null
       };
     }
 
-    return { found: false, key: null, x: 0, y: 0 };
+    return { found: false, key: null, x: 0, y: 0, cardCenter: null };
   }, Array.from(processedKeys));
 
-  if (!targetInfo.found) {
-    return { opened: false, key: null };
+  if (!candidate.found) {
+    return { opened: false, key: null, cardCenter: null };
   }
 
-  await sleep(250);
-  await page.mouse.move(targetInfo.x, targetInfo.y).catch(() => {});
-  await page.mouse.click(targetInfo.x, targetInfo.y).catch(() => {});
+  await sleep(200);
+  await page.mouse.move(candidate.x, candidate.y).catch(() => {});
+  await page.mouse.click(candidate.x, candidate.y).catch(() => {});
 
-  return { opened: true, key: targetInfo.key };
+  return {
+    opened: true,
+    key: candidate.key,
+    cardCenter: candidate.cardCenter
+  };
 }
 
-async function findCommentInputLocator(page, waitMs = 4500) {
+async function scrollBoardContainers(page) {
+  return page.evaluate(() => {
+    let moved = false;
+
+    const beforeWinY = window.scrollY;
+    const beforeWinX = window.scrollX;
+    window.scrollBy(0, 550);
+    if (window.scrollY > beforeWinY) {
+      moved = true;
+    } else {
+      window.scrollBy(550, 0);
+      if (window.scrollX > beforeWinX) {
+        moved = true;
+      }
+    }
+
+    const all = Array.from(document.querySelectorAll("div, section, main, ul, ol"));
+    for (const el of all) {
+      const style = window.getComputedStyle(el);
+      const canScrollY =
+        (style.overflowY === "auto" || style.overflowY === "scroll") &&
+        el.scrollHeight > el.clientHeight + 40;
+      const canScrollX =
+        (style.overflowX === "auto" || style.overflowX === "scroll") &&
+        el.scrollWidth > el.clientWidth + 40;
+
+      if (canScrollY && el.scrollTop + el.clientHeight < el.scrollHeight - 10) {
+        const prev = el.scrollTop;
+        el.scrollTop += 500;
+        if (el.scrollTop > prev) moved = true;
+      } else if (canScrollX && el.scrollLeft + el.clientWidth < el.scrollWidth - 10) {
+        const prev = el.scrollLeft;
+        el.scrollLeft += 500;
+        if (el.scrollLeft > prev) moved = true;
+      }
+    }
+
+    return moved;
+  });
+}
+
+async function findCommentInputLocator(page, waitMs = 2500) {
   const selector =
     'textarea:visible, div[contenteditable="true"]:visible, input[type="text"]:visible, [role="textbox"]:visible';
   const start = Date.now();
@@ -125,7 +193,6 @@ async function findCommentInputLocator(page, waitMs = 4500) {
               '[role="dialog"], [class*="comment"], [class*="Comment"], [class*="modal"], [class*="Modal"], form, aside'
             );
             const containerText = (container?.innerText || "").toLowerCase();
-            const isInDialogOrCommentBox = Boolean(container);
 
             const isCommentHint =
               ph.includes("comment") ||
@@ -143,7 +210,7 @@ async function findCommentInputLocator(page, waitMs = 4500) {
               y: rect.y,
               area: rect.width * rect.height,
               isCommentHint,
-              isInDialogOrCommentBox
+              isInDialogOrCommentBox: Boolean(container)
             };
           })
           .catch(() => null);
@@ -154,7 +221,7 @@ async function findCommentInputLocator(page, waitMs = 4500) {
         if (info.isCommentHint) score += 120;
         if (info.isInDialogOrCommentBox) score += 50;
         score += i * 5;
-        if (info.y > 100) score += 10;
+        if (info.y > 80) score += 10;
 
         if (score > bestScore) {
           bestScore = score;
@@ -168,7 +235,7 @@ async function findCommentInputLocator(page, waitMs = 4500) {
       return candidates.nth(count - 1);
     }
 
-    await sleep(300);
+    await sleep(250);
   }
 
   return null;
@@ -241,10 +308,10 @@ async function closeCommentModalIfOpen(page) {
   });
 
   if (closed) {
-    await sleep(400);
+    await sleep(350);
   } else {
     await page.keyboard.press("Escape").catch(() => {});
-    await sleep(300);
+    await sleep(250);
   }
 }
 
@@ -255,33 +322,57 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
   const processedKeys = new Set();
   let sentCount = 0;
   let targetIndex = 0;
+  let noNewTargetRetries = 0;
 
-  await waitForCommentTargets(page, 15000);
+  await waitForCommentTargets(page, 12000);
 
   while (targetIndex < maxPosts) {
     const res = await openNextCommentTarget(page, processedKeys);
 
     if (!res.opened) {
-      const scrolled = await page.evaluate(() => {
-        const before = window.scrollY;
-        window.scrollBy(0, 650);
-        return window.scrollY > before;
-      });
+      const scrolled = await scrollBoardContainers(page);
       if (scrolled) {
-        await sleep(1000);
+        noNewTargetRetries = 0;
+        await sleep(800);
         continue;
       }
-      break;
+
+      noNewTargetRetries++;
+      if (noNewTargetRetries >= 3) {
+        break;
+      }
+      await sleep(700);
+      continue;
     }
 
+    noNewTargetRetries = 0;
     if (res.key) {
       processedKeys.add(res.key);
     }
     targetIndex++;
 
+    let editor = await findCommentInputLocator(page, 1800);
+    if ((!editor || (await editor.count()) === 0) && res.cardCenter) {
+      await page.mouse.click(res.cardCenter.x, res.cardCenter.y).catch(() => {});
+      editor = await findCommentInputLocator(page, 2200);
+    }
+
+    if (!editor || (await editor.count()) === 0) {
+      await closeCommentModalIfOpen(page);
+      logs.push({
+        type: "comment",
+        section: `post-${targetIndex}`,
+        attempt: 1,
+        status: "error",
+        detail: `post-${targetIndex} (1/${repeatPerPost}回目) - コメント入力欄が見つかりませんでした`,
+        timestamp: new Date().toISOString()
+      });
+      continue;
+    }
+
     for (let r = 1; r <= repeatPerPost; r++) {
-      const editor = await findCommentInputLocator(page, 4500);
-      if (!editor || (await editor.count()) === 0) {
+      const currentEditor = r === 1 ? editor : await findCommentInputLocator(page, 1800);
+      if (!currentEditor || (await currentEditor.count()) === 0) {
         await closeCommentModalIfOpen(page);
         logs.push({
           type: "comment",
@@ -295,11 +386,11 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
       }
 
       try {
-        await setEditableValue(editor, textToComment);
-        await sleep(500);
+        await setEditableValue(currentEditor, textToComment);
+        await sleep(400);
 
         await clickCommentSubmitButton(page);
-        await sleep(1300);
+        await sleep(1100);
 
         sentCount++;
         logs.push({
@@ -326,7 +417,7 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
     }
 
     await closeCommentModalIfOpen(page);
-    await sleep(500);
+    await sleep(400);
   }
 
   return {
