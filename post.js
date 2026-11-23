@@ -2,44 +2,28 @@ const fs = require("fs");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// 各セクションの「+」ボタンを座標（左→右）順に取得して数を返す
 async function detectSections(page) {
   return page.evaluate(() => {
-    // 「セクション1」「セクション2」などの見出しや各セクション直下の「+」ボタンを数える
-    const allEls = Array.from(document.querySelectorAll('button, [role="button"], h2, h3, div, span'));
     const addButtons = Array.from(document.querySelectorAll('button, [role="button"]')).filter((el) => {
       const rect = el.getBoundingClientRect();
       const text = (el.innerText || "").trim();
       const aria = (el.getAttribute("aria-label") || "").toLowerCase();
-      // 右下の「+ 投稿」やヘッダー上のボタンを除外し、セクション列の「+」に絞る
-      const isRightBottomFab = rect.x > window.innerWidth * 0.8 && rect.y > window.innerHeight * 0.8;
+      // 右下の「+ 投稿」FABは除外
+      const isRightBottomFab = rect.x > window.innerWidth * 0.82 && rect.y > window.innerHeight * 0.78;
       if (isRightBottomFab || rect.width <= 0 || rect.height <= 0) return false;
-      if (rect.y < 120 || rect.y > 550) return false;
+      // セクションヘッダー直下の横長「+」ボタン（Y座標 120〜420px付近）
+      if (rect.y < 100 || rect.y > 450) return false;
       return (
         text === "+" ||
         aria.includes("add post") ||
-        aria.includes("投稿を追加") ||
-        aria.includes("セクション")
+        aria.includes("投稿を追加")
       );
     });
 
-    if (addButtons.length > 0) {
-      return addButtons.length;
-    }
-
-    const sectionHeaders = allEls.filter((el) => {
-      const t = (el.innerText || "").trim();
-      const rect = el.getBoundingClientRect();
-      return (
-        rect.width > 0 &&
-        rect.height > 0 &&
-        rect.y > 100 &&
-        rect.y < 400 &&
-        /^セクション\s*\d+$|^Section\s*\d+$/i.test(t) &&
-        el.children.length === 0
-      );
-    });
-
-    return sectionHeaders.length;
+    // 左から右へソート
+    addButtons.sort((a, b) => a.getBoundingClientRect().x - b.getBoundingClientRect().x);
+    return addButtons.length;
   });
 }
 
@@ -49,33 +33,35 @@ async function clickSectionAddButton(page, targetIdx) {
       const rect = el.getBoundingClientRect();
       const text = (el.innerText || "").trim();
       const aria = (el.getAttribute("aria-label") || "").toLowerCase();
-      const isRightBottomFab = rect.x > window.innerWidth * 0.8 && rect.y > window.innerHeight * 0.8;
+      const isRightBottomFab = rect.x > window.innerWidth * 0.82 && rect.y > window.innerHeight * 0.78;
       if (isRightBottomFab || rect.width <= 0 || rect.height <= 0) return false;
-      if (rect.y < 120 || rect.y > 550) return false;
+      if (rect.y < 100 || rect.y > 450) return false;
       return (
         text === "+" ||
         aria.includes("add post") ||
-        aria.includes("投稿を追加") ||
-        aria.includes("セクション")
+        aria.includes("投稿を追加")
       );
     });
 
+    addButtons.sort((a, b) => a.getBoundingClientRect().x - b.getBoundingClientRect().x);
+
     if (idx < addButtons.length) {
-      addButtons[idx].scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
-      addButtons[idx].click();
+      const btn = addButtons[idx];
+      btn.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+      btn.click();
       return true;
     }
     return false;
   }, targetIdx);
 }
 
-// GIFファイルをブラウザ上でコピー＆ペースト（ClipboardEvent + DataTransfer）する
-async function pasteGifToComposer(page, gifFilePath) {
+// GIFファイルをペースト（ClipboardEvent）＋ file input の両方で添付
+async function attachGifToComposer(page, gifFilePath) {
   if (!gifFilePath || !fs.existsSync(gifFilePath)) return false;
 
   const base64Data = fs.readFileSync(gifFilePath).toString("base64");
 
-  const pasted = await page.evaluate(async (b64) => {
+  await page.evaluate(async (b64) => {
     const binStr = atob(b64);
     const len = binStr.length;
     const bytes = new Uint8Array(len);
@@ -84,21 +70,17 @@ async function pasteGifToComposer(page, gifFilePath) {
     }
     const file = new File([bytes], "anim.gif", { type: "image/gif" });
 
-    // 可能な場合は ClipboardItem にも書き込む（Ctrl+V / 貼り付けイベントの両対応用）
     if (navigator.clipboard && typeof ClipboardItem !== "undefined") {
       try {
         await navigator.clipboard.write([new ClipboardItem({ "image/gif": file })]);
       } catch (_) {}
     }
 
-    // 投稿カード内のフォーカス先を探す
     const targets = Array.from(
-      document.querySelectorAll(
-        '[contenteditable="true"], textarea, input[type="text"], [role="dialog"]'
-      )
+      document.querySelectorAll('[contenteditable="true"], textarea, input[type="text"], [role="dialog"]')
     ).filter((el) => {
       const r = el.getBoundingClientRect();
-      return r.width > 0 && r.height > 0 && r.x > window.innerWidth * 0.4;
+      return r.width > 0 && r.height > 0 && r.x > window.innerWidth * 0.35;
     });
 
     const target = targets[targets.length - 1] || document.activeElement || document.body;
@@ -112,29 +94,29 @@ async function pasteGifToComposer(page, gifFilePath) {
       cancelable: true,
       clipboardData: dt
     });
-
-    return target.dispatchEvent(pasteEvent);
+    target.dispatchEvent(pasteEvent);
   }, base64Data);
 
-  await sleep(800);
-
-  // 念のため実際の Ctrl+V / Meta+V キー操作も送る
+  await sleep(600);
   await page.keyboard.down("Control");
   await page.keyboard.press("v");
   await page.keyboard.up("Control");
-  await sleep(1500);
+  await sleep(1200);
 
-  // もし貼り付けで反映されなかった場合のフォールバック（file input への直接セット）
-  const fileInputCount = await page.locator('input[type="file"]').count();
-  if (!pasted && fileInputCount > 0) {
-    await page.locator('input[type="file"]').first().setInputFiles(gifFilePath);
-    await sleep(2000);
+  // hidden の input[type="file"] にも直接セットして確実にアップロードさせる
+  const fileInputs = page.locator('input[type="file"]');
+  const fileInputCount = await fileInputs.count();
+  if (fileInputCount > 0) {
+    try {
+      await fileInputs.last().setInputFiles(gifFilePath);
+      await sleep(2200);
+    } catch (_) {}
   }
 
   return true;
 }
 
-async function clickPublishButton(page) {
+async function clickPublishAndEnsureClosed(page) {
   const clicked = await page.evaluate(() => {
     const candidates = Array.from(document.querySelectorAll('button, [role="button"]')).filter((el) => {
       const rect = el.getBoundingClientRect();
@@ -151,7 +133,6 @@ async function clickPublishButton(page) {
     });
 
     if (candidates.length === 0) return false;
-    // 一番右・手前にある公開ボタンをクリック
     candidates.sort((a, b) => b.getBoundingClientRect().x - a.getBoundingClientRect().x);
     candidates[0].click();
     return true;
@@ -161,9 +142,10 @@ async function clickPublishButton(page) {
     await page.keyboard.press("Control+Enter");
   }
 
-  await sleep(2000);
+  // 投稿送信＆カードが閉じるまで少し待つ
+  await sleep(2500);
 
-  // 下書きカードが残っていたら「×」で閉じて次のループを詰まらせない
+  // 万が一カードが残っていたら「×」で閉じる
   await page.evaluate(() => {
     const closeBtns = Array.from(document.querySelectorAll('button, [role="button"]')).filter((el) => {
       const r = el.getBoundingClientRect();
@@ -173,6 +155,7 @@ async function clickPublishButton(page) {
         r.width > 0 &&
         r.height > 0 &&
         r.x > window.innerWidth * 0.5 &&
+        r.y < window.innerHeight * 0.45 &&
         (t === "×" || t === "✕" || a.includes("close") || a.includes("閉じる"))
       );
     });
@@ -181,7 +164,7 @@ async function clickPublishButton(page) {
     }
   });
 
-  await sleep(800);
+  await sleep(700);
 }
 
 async function createSinglePost(page, { sectionIndex, totalSections, message, gifFilePath }) {
@@ -191,6 +174,7 @@ async function createSinglePost(page, { sectionIndex, totalSections, message, gi
   }
 
   if (!clickedAdd) {
+    // フォールバック：右下の「+ 投稿」ボタン
     clickedAdd = await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
       for (const b of btns) {
@@ -200,11 +184,7 @@ async function createSinglePost(page, { sectionIndex, totalSections, message, gi
         if (
           rect.width > 0 &&
           rect.height > 0 &&
-          (t === "+" ||
-            a.includes("add") ||
-            a.includes("create") ||
-            a.includes("追加") ||
-            a.includes("投稿"))
+          (t.includes("投稿") || t === "+" || a.includes("create post") || a.includes("add post"))
         ) {
           b.click();
           return true;
@@ -218,8 +198,9 @@ async function createSinglePost(page, { sectionIndex, totalSections, message, gi
     throw new Error("投稿追加ボタンが見つかりませんでした");
   }
 
-  await sleep(1200);
+  await sleep(1400);
 
+  // 開いた投稿カード内の入力欄を取得
   const editables = page.locator('div[contenteditable="true"], textarea, input[type="text"]');
   const editableCount = await editables.count();
   if (editableCount === 0) {
@@ -232,9 +213,10 @@ async function createSinglePost(page, { sectionIndex, totalSections, message, gi
     await target.click();
     await target.fill(textToType);
   } else {
+    // 1つ目（件名）と最後の入力欄（本文）に入力
     await editables.nth(0).click();
     await editables.nth(0).fill(textToType);
-    await sleep(200);
+    await sleep(250);
     await editables.nth(editableCount - 1).click();
     await editables.nth(editableCount - 1).fill(textToType);
   }
@@ -242,10 +224,10 @@ async function createSinglePost(page, { sectionIndex, totalSections, message, gi
   await sleep(500);
 
   if (gifFilePath && fs.existsSync(gifFilePath)) {
-    await pasteGifToComposer(page, gifFilePath);
+    await attachGifToComposer(page, gifFilePath);
   }
 
-  await clickPublishButton(page);
+  await clickPublishAndEnsureClosed(page);
 }
 
 async function runPosts(page, { message, gifFilePath, repeat }) {
@@ -281,7 +263,7 @@ async function runPosts(page, { message, gifFilePath, repeat }) {
           timestamp: new Date().toISOString()
         });
       }
-      await sleep(700);
+      await sleep(800);
     }
   }
 
