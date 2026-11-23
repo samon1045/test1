@@ -120,8 +120,28 @@ function resolveLocalGifPath() {
 }
 
 async function setEditableValueExact(locator, text) {
-  await locator.click({ timeout: 8000 });
-  await locator.fill(text, { timeout: 8000 });
+  await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+  await locator.click({ timeout: 4000 });
+  await locator.fill(text, { timeout: 4000 });
+}
+
+async function waitForPostEditor(page, shouldStop, maxWaitMs = 5000) {
+  const selector = 'div[contenteditable="true"], textarea, input[type="text"]';
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    if (shouldStop()) return null;
+    const loc = page.locator(selector);
+    const cnt = await loc.count().catch(() => 0);
+    if (cnt > 0) {
+      const visible = await loc
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (visible) return loc;
+    }
+    await sleep(250);
+  }
+  return null;
 }
 
 async function sleepWithStop(ms, shouldStop) {
@@ -227,7 +247,6 @@ async function clickAddButtonForSection(page, secIdx, sectionObj) {
         );
       };
 
-      // 1. まずセクション列のX座標に近い「+ / 追加」ボタンを探す
       if (centerX !== null) {
         const columnPlusBtns = allBtns
           .filter((btn) => {
@@ -250,7 +269,6 @@ async function clickAddButtonForSection(page, secIdx, sectionObj) {
         }
       }
 
-      // 2. なければ汎用追加/投稿ボタンを探す
       const generalBtns = allBtns.filter((btn) => {
         const r = btn.getBoundingClientRect();
         if (r.width <= 0 || r.height <= 0) return false;
@@ -279,7 +297,6 @@ async function clickAddButtonForSection(page, secIdx, sectionObj) {
 
   if (!result || !result.clicked) return false;
 
-  // フォーム内のセクション選択UIがあれば対象セクションを選ぶ
   await sleep(500);
   await page
     .evaluate((targetTitle) => {
@@ -464,8 +481,10 @@ app.post("/run", async (req, res) => {
             const secObj = sectionList[secIdx] || { title: `セクション${secIdx + 1}`, centerX: null };
             const sectionName = `Section ${secIdx + 1}`;
             try {
-              const clickedAdd = await clickAddButtonForSection(page, secIdx, secObj);
+              await page.keyboard.press("Escape").catch(() => {});
+              await sleep(250);
 
+              const clickedAdd = await clickAddButtonForSection(page, secIdx, secObj);
               if (!clickedAdd) {
                 logs.push({
                   type: "post",
@@ -478,14 +497,25 @@ app.post("/run", async (req, res) => {
                 continue;
               }
 
-              if (await sleepWithStop(1500, shouldStop)) {
+              const editables = await waitForPostEditor(page, shouldStop, 5000);
+              if (shouldStop()) {
                 stoppedByUser = true;
                 break;
               }
 
-              const editables = page.locator(
-                'div[contenteditable="true"], textarea, input[type="text"]'
-              );
+              if (!editables) {
+                logs.push({
+                  type: "post",
+                  section: sectionName,
+                  attempt: roundNum,
+                  status: "error",
+                  detail: "投稿フォームの入力欄が開きませんでした",
+                  timestamp: new Date().toISOString()
+                });
+                await page.keyboard.press("Escape").catch(() => {});
+                continue;
+              }
+
               const editableCount = await editables.count().catch(() => 0);
               if (editableCount > 0) {
                 await setEditableValueExact(editables.nth(0), titleMessage);
@@ -494,7 +524,7 @@ app.post("/run", async (req, res) => {
                 await setEditableValueExact(editables.nth(1), customMessage);
               }
 
-              if (await sleepWithStop(800, shouldStop)) {
+              if (await sleepWithStop(600, shouldStop)) {
                 stoppedByUser = true;
                 break;
               }
@@ -503,8 +533,8 @@ app.post("/run", async (req, res) => {
                 try {
                   const fileInput = page.locator('input[type="file"]').first();
                   if ((await fileInput.count().catch(() => 0)) > 0) {
-                    await fileInput.setInputFiles(imagePath, { timeout: 10000 });
-                    if (await sleepWithStop(2000, shouldStop)) {
+                    await fileInput.setInputFiles(imagePath, { timeout: 6000 });
+                    if (await sleepWithStop(1500, shouldStop)) {
                       stoppedByUser = true;
                       break;
                     }
@@ -515,7 +545,7 @@ app.post("/run", async (req, res) => {
                     section: sectionName,
                     attempt: roundNum,
                     status: "error",
-                    detail: `画像アップロードスキップ: ${imgErr.message}`,
+                    detail: `画像アップロードスキップ: ${imgErr.message.split("\n")[0]}`,
                     timestamp: new Date().toISOString()
                   });
                 }
@@ -567,11 +597,12 @@ app.post("/run", async (req, res) => {
                 timestamp: new Date().toISOString()
               });
 
-              if (await sleepWithStop(3500, shouldStop)) {
+              if (await sleepWithStop(2500, shouldStop)) {
                 stoppedByUser = true;
                 break;
               }
             } catch (err) {
+              await page.keyboard.press("Escape").catch(() => {});
               logs.push({
                 type: "post",
                 section: sectionName,
@@ -593,98 +624,111 @@ app.post("/run", async (req, res) => {
               break;
             }
 
-            const opened = await page
-              .evaluate(() => {
-                const allEls = Array.from(
-                  document.querySelectorAll('button, [role="button"], span, div')
-                );
-                for (const el of allEls) {
-                  const t = (el.innerText || "").trim();
-                  const a = el.getAttribute("aria-label") || "";
-                  if (
-                    t.includes("Add comment") ||
-                    t.includes("コメントを追加") ||
-                    a.toLowerCase().includes("comment")
-                  ) {
-                    const rect = el.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0) {
-                      el.click();
-                      return true;
-                    }
-                  }
-                }
-                return false;
-              })
-              .catch(() => false);
-
-            if (!opened) break;
-
-            if (await sleepWithStop(1200, shouldStop)) {
-              stoppedByUser = true;
-              break;
-            }
-
-            const editor = page.locator('div[contenteditable="true"], textarea').last();
-            if ((await editor.count().catch(() => 0)) === 0) {
-              await page.keyboard.press("Escape").catch(() => {});
-              break;
-            }
-
-            for (let r = 1; r <= cRepeat; r++) {
-              if (shouldStop()) {
-                stoppedByUser = true;
-                break;
-              }
-
-              await setEditableValueExact(editor, commentMessage);
-              if (await sleepWithStop(800, shouldStop)) {
-                stoppedByUser = true;
-                break;
-              }
-
-              const sentByButton = await page
+            try {
+              const opened = await page
                 .evaluate(() => {
-                  const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-                  for (const b of buttons) {
-                    const t = (b.innerText || "").trim();
-                    const a = (b.getAttribute("aria-label") || "").toLowerCase();
-                    const rect = b.getBoundingClientRect();
+                  const allEls = Array.from(
+                    document.querySelectorAll('button, [role="button"], span, div')
+                  );
+                  for (const el of allEls) {
+                    const t = (el.innerText || "").trim();
+                    const a = el.getAttribute("aria-label") || "";
                     if (
-                      rect.width > 0 &&
-                      rect.height > 0 &&
-                      (t.includes("コメント") ||
-                        t.includes("Comment") ||
-                        a.includes("send") ||
-                        a.includes("送信"))
+                      t.includes("Add comment") ||
+                      t.includes("コメントを追加") ||
+                      a.toLowerCase().includes("comment")
                     ) {
-                      b.click();
-                      return true;
+                      const rect = el.getBoundingClientRect();
+                      if (rect.width > 0 && rect.height > 0) {
+                        el.click();
+                        return true;
+                      }
                     }
                   }
                   return false;
                 })
                 .catch(() => false);
 
-              if (!sentByButton) {
-                await page.keyboard.press("Enter").catch(() => {});
-              }
+              if (!opened) break;
 
-              logs.push({
-                type: "comment",
-                section: `round-${roundNum}/post-${i + 1}`,
-                attempt: r,
-                status: "ok",
-                detail: `コメント送信 (${r}/${cRepeat})`,
-                timestamp: new Date().toISOString()
-              });
-
-              if (await sleepWithStop(2000, shouldStop)) {
+              if (await sleepWithStop(1000, shouldStop)) {
                 stoppedByUser = true;
                 break;
               }
-            }
 
-            if (stoppedByUser) break;
+              const editor = page.locator('div[contenteditable="true"], textarea').last();
+              if ((await editor.count().catch(() => 0)) === 0) {
+                await page.keyboard.press("Escape").catch(() => {});
+                break;
+              }
+
+              for (let r = 1; r <= cRepeat; r++) {
+                if (shouldStop()) {
+                  stoppedByUser = true;
+                  break;
+                }
+
+                await setEditableValueExact(editor, commentMessage);
+                if (await sleepWithStop(600, shouldStop)) {
+                  stoppedByUser = true;
+                  break;
+                }
+
+                const sentByButton = await page
+                  .evaluate(() => {
+                    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+                    for (const b of buttons) {
+                      const t = (b.innerText || "").trim();
+                      const a = (b.getAttribute("aria-label") || "").toLowerCase();
+                      const rect = b.getBoundingClientRect();
+                      if (
+                        rect.width > 0 &&
+                        rect.height > 0 &&
+                        (t.includes("コメント") ||
+                          t.includes("Comment") ||
+                          a.includes("send") ||
+                          a.includes("送信"))
+                      ) {
+                        b.click();
+                        return true;
+                      }
+                    }
+                    return false;
+                  })
+                  .catch(() => false);
+
+                if (!sentByButton) {
+                  await page.keyboard.press("Enter").catch(() => {});
+                }
+
+                logs.push({
+                  type: "comment",
+                  section: `round-${roundNum}/post-${i + 1}`,
+                  attempt: r,
+                  status: "ok",
+                  detail: `コメント送信 (${r}/${cRepeat})`,
+                  timestamp: new Date().toISOString()
+                });
+
+                if (await sleepWithStop(1500, shouldStop)) {
+                  stoppedByUser = true;
+                  break;
+                }
+              }
+
+              if (stoppedByUser) break;
+            } catch (commentErr) {
+              await page.keyboard.press("Escape").catch(() => {});
+              logs.push({
+                type: "comment",
+                section: `round-${roundNum}/post-${i + 1}`,
+                attempt: 1,
+                status: "error",
+                detail: commentErr && commentErr.message ? commentErr.message.split("\n")[0] : "コメントエラー",
+                timestamp: new Date().toISOString()
+              });
+              break;
+            }
           }
         }
 
