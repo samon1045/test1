@@ -1,4 +1,3 @@
-```html
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -75,30 +74,33 @@
   <div class="shell" id="shell">
     <div id="output"></div>
     <div class="prompt-row" id="promptRow">
-      <span class="prompt-label">PS C:\WINDOWS\system32&gt;</span>
+      <span class="prompt-label" id="promptLabel">PS C:\WINDOWS\system32&gt;</span>
       <input type="text" class="cmd-input" id="cmdInput" autocomplete="off" spellcheck="false" />
     </div>
   </div>
 
   <script>
-    const STORAGE_KEY = "samon_ps_padlet_state_v8";
+    const STORAGE_KEY = "samon_ps_padlet_state_v9";
     const RENDER_BASE_URL = "https://test1-1-qyfl.onrender.com/";
 
     const outputEl = document.getElementById("output");
     const promptRowEl = document.getElementById("promptRow");
+    const promptLabelEl = document.getElementById("promptLabel");
     const cmdInput = document.getElementById("cmdInput");
     const shellEl = document.getElementById("shell");
 
     const defaultState = {
       apiUrl: RENDER_BASE_URL,
       roomUrl: "",
-      message: "",
+      titleMessage: "お知らせ",
+      message: "メッセージ",
       commentMessage: "",
+      gifFile: "_______.gif",
       cookie: "",
-      repeat: 1,
+      repeat: 2,
       commentRepeat: 1,
       enablePost: true,
-      enableComment: false,
+      enableComment: true,
       enableVideo: true
     };
 
@@ -111,6 +113,9 @@
     let history = [];
     let historyIdx = -1;
     let isRunning = false;
+    let currentJobId = null;
+    let stopRequested = false;
+    let activeAbortController = null;
     const savedRecordings = [];
 
     function loadState() {
@@ -199,14 +204,17 @@
       appendLine("Copyright (C) Microsoft Corporation. All rights reserved.");
       appendLine("");
       appendRich([
-        ["新機能と改善のために 最新の PowerShell をインストールしてください！ ", ""],
-        ["https://aka.ms/PSWindows", "cyan"]
+        ["実行中に途中で止めたい場合は ", ""],
+        ["stop", "yellow"],
+        [" と入力するか ", ""],
+        ["Esc", "yellow"],
+        [" を押してください。", ""]
       ]);
       appendLine("");
       appendRich([
-        ["利用可能なコマンド一覧を確認するには ", ""],
+        ["コマンド一覧は ", ""],
         ["help", "cyan"],
-        [" または ", ""],
+        ["、画面消去は ", ""],
         ["cls", "cyan"],
         [" と入力してください。", ""]
       ]);
@@ -217,12 +225,13 @@
       return new Promise((r) => setTimeout(r, ms));
     }
 
-    function setPromptVisible(visible) {
-      promptRowEl.style.display = visible ? "flex" : "none";
-      cmdInput.disabled = !visible;
-      if (visible) {
-        cmdInput.focus();
-      }
+    function updatePromptState() {
+      promptRowEl.style.display = "flex";
+      cmdInput.disabled = false;
+      promptLabelEl.textContent = isRunning
+        ? "PS [RUNNING - stopで中断]> "
+        : "PS C:\\WINDOWS\\system32> ";
+      cmdInput.focus();
     }
 
     function tokenize(raw) {
@@ -250,9 +259,33 @@
       return null;
     }
 
+    async function requestStopJob() {
+      if (!isRunning) {
+        appendLine("現在実行中の処理はありません。", "gray");
+        return;
+      }
+      stopRequested = true;
+      const endpoint = (state.apiUrl || RENDER_BASE_URL).replace(/\/+$/, "") + "/stop";
+      appendLine("中断リクエストを送信しました（現在の待機・ステップ完了後に停止します）...", "yellow");
+
+      try {
+        await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobId: currentJobId })
+        });
+      } catch (_) {}
+
+      setTimeout(() => {
+        if (isRunning && stopRequested && activeAbortController) {
+          activeAbortController.abort();
+        }
+      }, 4000);
+    }
+
     async function runBotSequence() {
       if (isRunning) {
-        appendLine("すでに実行中です。", "yellow");
+        appendLine("すでに実行中です。止めるには stop と入力してください。", "yellow");
         return;
       }
 
@@ -270,43 +303,40 @@
 
       const endpoint = (state.apiUrl || RENDER_BASE_URL).replace(/\/+$/, "") + "/run";
       isRunning = true;
-      setPromptVisible(false);
+      stopRequested = false;
+      currentJobId =
+        window.crypto && typeof window.crypto.randomUUID === "function"
+          ? window.crypto.randomUUID()
+          : "job_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+      updatePromptState();
 
       const startedAt = Date.now();
       appendLine("Render サーバーへリクエストを送信中...", "cyan");
+      appendLine("Job ID         : " + currentJobId, "gray");
       appendLine("Endpoint       : " + endpoint, "gray");
       appendLine("Room URL       : " + state.roomUrl, "gray");
-      appendLine(
-        "Mode           : 投稿=" +
-          (state.enablePost ? "ON" : "OFF") +
-          " / コメント=" +
-          (state.enableComment ? "ON" : "OFF") +
-          " / 録画=" +
-          (state.enableVideo ? "ON" : "OFF"),
-        "gray"
-      );
-      appendLine("Message        : " + (state.message || "(未設定)"), "gray");
+      appendLine("Title          : " + (state.titleMessage || "お知らせ"), "gray");
+      appendLine("Message        : " + (state.message || "メッセージ"), "gray");
+      appendLine("Image / GIF    : " + (state.gifFile || "_______.gif"), "gray");
       if (state.enableComment) {
-        appendLine("Comment Msg    : " + (state.commentMessage || state.message || "(未設定)"), "gray");
+        appendLine("Comment Msg    : " + (state.commentMessage || state.message || "メッセージ"), "gray");
         appendLine("Comment Repeat : " + state.commentRepeat + " 回/投稿", "gray");
       }
       if (state.enablePost) {
-        appendLine("Repeat         : " + state.repeat + " 回/セクション", "gray");
-      }
-      if (state.enablePost && state.enableComment && state.repeat >= 2) {
-        appendLine("ヒント: 投稿＋コメントを同時実行すると時間が長くなります。必要なら処理を分けて実行してください。", "yellow");
+        appendLine("Rounds         : " + state.repeat + " ラウンド", "gray");
       }
       appendLine("");
 
       const progressLine = appendLine("  [待機中] Playwright 実行中... (0秒経過)", "gray");
       const progressTimer = setInterval(() => {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
-        progressLine.textContent = `  [待機中] Playwright 実行中... (${elapsed}秒経過)`;
+        const tag = stopRequested ? "[中断要求中]" : "[待機中]";
+        progressLine.textContent = `  ${tag} Playwright 実行中... (${elapsed}秒経過)`;
         window.scrollTo(0, document.body.scrollHeight);
       }, 1000);
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 600000);
+      activeAbortController = new AbortController();
+      const timeoutId = setTimeout(() => activeAbortController.abort(), 600000);
 
       try {
         const res = await fetch(endpoint, {
@@ -314,11 +344,14 @@
           headers: {
             "Content-Type": "application/json"
           },
-          signal: controller.signal,
+          signal: activeAbortController.signal,
           body: JSON.stringify({
+            jobId: currentJobId,
             roomUrl: state.roomUrl,
+            titleMessage: state.titleMessage,
             message: state.message,
             commentMessage: state.commentMessage,
+            gifFile: state.gifFile,
             cookie: state.cookie,
             repeat: state.repeat,
             commentRepeat: state.commentRepeat,
@@ -344,13 +377,15 @@
         }
 
         const totalSec = ((Date.now() - startedAt) / 1000).toFixed(1);
-        progressLine.textContent = `  [応答受信] HTTP ${res.status} (${totalSec}秒で完了)`;
-        progressLine.className = res.ok && data.ok ? "line cyan" : "line yellow";
+        progressLine.textContent = data.stopped
+          ? `  [中断完了] HTTP ${res.status} (${totalSec}秒で停止)`
+          : `  [応答受信] HTTP ${res.status} (${totalSec}秒で完了)`;
+        progressLine.className = res.ok && data.ok ? (data.stopped ? "line yellow" : "line cyan") : "line yellow";
 
         if (Array.isArray(data.logs) && data.logs.length > 0) {
           appendLine("--- 実行ログ一覧 ---", "cyan");
           for (const item of data.logs) {
-            await sleep(60);
+            await sleep(40);
             const isOk = item.status !== "error";
             const tag = item.type === "comment" ? "COMMENT" : "POST";
             const statusText = item.detail ? ` - ${item.detail}` : "";
@@ -370,17 +405,17 @@
             data.videoFileName || `samon_run_${Date.now()}.webm`
           );
         } else if (state.enableVideo) {
-          appendLine(
-            "  (" + (data.videoSkippedReason || "録画データは含まれていませんでした") + ")",
-            "gray"
-          );
+          appendLine("  (録画データは含まれていませんでした)", "gray");
         }
 
         if (!res.ok || !data.ok) {
           appendLine("エラー: " + (data.error || "HTTP " + res.status), "yellow");
-          appendLine("レスポンス詳細: " + JSON.stringify({ ...data, videoBase64: undefined }), "gray");
           appendLine("");
           return;
+        }
+
+        if (data.stopped) {
+          appendLine("途中で停止しました。", "yellow");
         }
 
         const sectionInfo = state.enablePost ? `検出セクション: ${data.detectedSections ?? 1} / ` : "";
@@ -393,29 +428,31 @@
         clearTimeout(timeoutId);
         clearInterval(progressTimer);
         const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+
+        if (stopRequested) {
+          progressLine.textContent = `  [中断完了] ${elapsed}秒経過時点で停止しました`;
+          progressLine.className = "line yellow";
+          appendLine("コマンドの実行を途中で停止しました。", "yellow");
+          appendLine("");
+          return;
+        }
+
         progressLine.textContent = `  [通信中断] ${elapsed}秒経過時点でエラー発生`;
         progressLine.className = "line yellow";
-
-        const isAbort = err && err.name === "AbortError";
-        const msg = isAbort
-          ? `リクエストがタイムアウトしました（${elapsed}秒経過）。repeat回数や対象セクション数を減らすか、投稿とコメントを分けて実行してみてください。`
-          : err && err.message
-            ? err.message
-            : String(err);
-
-        appendLine("通信エラー: " + msg, "yellow");
-        appendLine("エラー種別: " + (err && err.name ? err.name : "Error"), "gray");
-        appendLine("ヒント: 投稿とコメントを別々に実行するか、set-rec off で録画を切ると安定しやすくなります。", "gray");
+        appendLine("通信エラー: " + (err && err.message ? err.message : String(err)), "yellow");
         appendLine("");
       } finally {
         isRunning = false;
-        setPromptVisible(true);
+        currentJobId = null;
+        stopRequested = false;
+        activeAbortController = null;
+        updatePromptState();
       }
     }
 
     async function handleCommand(rawLine) {
       const trimmed = rawLine.trim();
-      appendLine("PS C:\\WINDOWS\\system32>" + rawLine);
+      appendLine(promptLabelEl.textContent + rawLine);
 
       if (!trimmed) return;
 
@@ -425,6 +462,16 @@
       const tokens = tokenize(trimmed);
       const cmd = tokens[0].toLowerCase();
       const argText = trimmed.slice(tokens[0].length).trim();
+
+      if (cmd === "stop" || cmd === "cancel" || cmd === "abort") {
+        await requestStopJob();
+        return;
+      }
+
+      if (isRunning) {
+        appendLine("実行中です。途中で止める場合は stop と入力してください。", "yellow");
+        return;
+      }
 
       if (cmd === "cls" || cmd === "clear") {
         outputEl.innerHTML = "";
@@ -445,18 +492,21 @@
         appendLine("  config                 現在の設定を表示");
         appendLine("  reset-config           設定を初期値に戻す");
         appendLine("  recordings             取得した録画一覧を表示");
-        appendLine("  set-post <on|off>      新規投稿をするか設定（既定: on）");
-        appendLine("  set-comment <on|off>   全投稿へコメントをするか設定（既定: off）");
-        appendLine("  set-rec <on|off>       実行中の録画保存をするか設定（既定: on）");
+        appendLine("  set-post <on|off>      投稿処理の有効/無効（既定: on）");
+        appendLine("  set-comment <on|off>   コメント処理の有効/無効（既定: on）");
+        appendLine("  set-rec <on|off>       録画保存の有効/無効（既定: on）");
         appendLine("  set-api <URL>          Renderエンドポイントを設定");
-        appendLine("  set-url <URL>          部屋のURLを設定");
-        appendLine("  set-msg <TEXT>         投稿用メッセージを設定");
-        appendLine("  set-cmsg <TEXT>        コメント用メッセージを設定（未設定時は投稿msgを使用）");
-        appendLine("  set-crepeat <NUM>      1投稿あたりのコメント繰り返し回数を設定（1〜10、既定: 1）");
-        appendLine("  set-cookie <VALUE>     Cookie（JSON配列または key=val 文字列）を設定");
+        appendLine("  set-url <URL>          対象ボードのURLを設定");
+        appendLine("  set-title <TEXT>       決められた投稿タイトルを設定");
+        appendLine("  set-msg <TEXT>         決められた投稿メッセージを設定");
+        appendLine("  set-cmsg <TEXT>        決められたコメントメッセージを設定");
+        appendLine("  set-gif <FILENAME>     使用する画像/GIFファイル名を設定（既定: _______.gif）");
+        appendLine("  set-crepeat <NUM>      1投稿あたりのコメント回数（1〜10）");
+        appendLine("  set-cookie <VALUE>     Cookie（JSON配列または key=val）を設定");
         appendLine("  clear-cookie           保存済みCookieを削除");
-        appendLine("  set-repeat <NUM>       1セクションあたりの投稿繰り返し回数を設定（1〜10、既定: 1）");
-        appendLine("  run                    Renderへ送信して実行");
+        appendLine("  set-repeat <NUM>       ラウンド数（1〜10、既定: 2）");
+        appendLine("  run                    設定内容で実行");
+        appendLine("  stop                   実行中の処理を途中で停止（Escキーでも可）");
         appendLine("");
         return;
       }
@@ -483,8 +533,10 @@
         appendLine("  post          : " + (state.enablePost ? "ON" : "OFF"));
         appendLine("  comment       : " + (state.enableComment ? "ON" : "OFF"));
         appendLine("  record        : " + (state.enableVideo ? "ON" : "OFF"));
-        appendLine("  message       : " + (state.message || "(未設定)"));
+        appendLine("  titleMessage  : " + (state.titleMessage || "お知らせ"));
+        appendLine("  message       : " + (state.message || "メッセージ"));
         appendLine("  commentMsg    : " + (state.commentMessage || "(未設定 -> messageを使用)"));
+        appendLine("  gifFile       : " + (state.gifFile || "_______.gif"));
         appendLine("  commentRepeat : " + state.commentRepeat);
         appendLine("  cookie        : " + (state.cookie ? `設定済み (${state.cookie.length} 文字)` : "(未設定)"));
         appendLine("  repeat        : " + state.repeat);
@@ -495,7 +547,7 @@
       if (cmd === "set-post") {
         const parsed = parseToggle(tokens[1]);
         if (parsed === null) {
-          appendLine("on または off を指定してください（例: set-post on / set-post off）。", "yellow");
+          appendLine("on または off を指定してください。", "yellow");
           return;
         }
         state.enablePost = parsed;
@@ -507,7 +559,7 @@
       if (cmd === "set-comment") {
         const parsed = parseToggle(tokens[1]);
         if (parsed === null) {
-          appendLine("on または off を指定してください（例: set-comment on / set-comment off）。", "yellow");
+          appendLine("on または off を指定してください。", "yellow");
           return;
         }
         state.enableComment = parsed;
@@ -519,7 +571,7 @@
       if (cmd === "set-rec") {
         const parsed = parseToggle(tokens[1]);
         if (parsed === null) {
-          appendLine("on または off を指定してください（例: set-rec on / set-rec off）。", "yellow");
+          appendLine("on または off を指定してください。", "yellow");
           return;
         }
         state.enableVideo = parsed;
@@ -552,6 +604,13 @@
         return;
       }
 
+      if (cmd === "set-title") {
+        state.titleMessage = stripOuterQuotes(argText);
+        saveState();
+        appendLine("titleMessage を更新しました: " + state.titleMessage, "green");
+        return;
+      }
+
       if (cmd === "set-msg") {
         state.message = stripOuterQuotes(argText);
         saveState();
@@ -563,6 +622,13 @@
         state.commentMessage = stripOuterQuotes(argText);
         saveState();
         appendLine("commentMessage を更新しました: " + state.commentMessage, "green");
+        return;
+      }
+
+      if (cmd === "set-gif" || cmd === "set-image") {
+        state.gifFile = stripOuterQuotes(argText);
+        saveState();
+        appendLine("gifFile を更新しました: " + state.gifFile, "green");
         return;
       }
 
@@ -617,11 +683,24 @@
         return;
       }
 
-      appendLine(cmd + " : 用語 '" + cmd + "' は、コマンドレット、関数、スクリプト ファイル、または操作可能なプログラムの名前として認識されません。", "yellow");
+      appendLine(
+        cmd +
+          " : 用語 '" +
+          cmd +
+          "' は、コマンドレット、関数、スクリプト ファイル、または操作可能なプログラムの名前として認識されません。",
+        "yellow"
+      );
       appendLine("");
     }
 
     cmdInput.addEventListener("keydown", async (e) => {
+      if (e.key === "Escape" && isRunning) {
+        e.preventDefault();
+        appendLine(promptLabelEl.textContent + "stop (Esc)");
+        await requestStopJob();
+        return;
+      }
+
       if (e.key === "Enter") {
         const val = cmdInput.value;
         cmdInput.value = "";
@@ -645,12 +724,12 @@
     });
 
     shellEl.addEventListener("click", () => {
-      if (!isRunning) cmdInput.focus();
+      cmdInput.focus();
     });
 
     window.addEventListener("DOMContentLoaded", () => {
       printBanner();
-      setPromptVisible(true);
+      updatePromptState();
     });
   </script>
 </body>
