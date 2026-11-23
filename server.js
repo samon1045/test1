@@ -26,9 +26,11 @@ app.use(express.json({ limit: "2mb" }));
 function withTimeout(promise, ms, fallbackValue = null) {
   let timer = null;
   return Promise.race([
-    promise.finally(() => {
-      if (timer) clearTimeout(timer);
-    }),
+    Promise.resolve(promise)
+      .catch(() => fallbackValue)
+      .finally(() => {
+        if (timer) clearTimeout(timer);
+      }),
     new Promise((resolve) => {
       timer = setTimeout(() => resolve(fallbackValue), ms);
     })
@@ -120,23 +122,20 @@ function resolveLocalGifPath() {
 }
 
 async function setEditableValueExact(locator, text) {
-  await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-  await locator.click({ timeout: 4000 });
-  await locator.fill(text, { timeout: 4000 });
+  await withTimeout(locator.scrollIntoViewIfNeeded(), 2000, null);
+  await withTimeout(locator.click(), 3000, null);
+  await withTimeout(locator.fill(text), 3000, null);
 }
 
-async function waitForPostEditor(page, shouldStop, maxWaitMs = 6000) {
+async function waitForPostEditor(page, shouldStop, maxWaitMs = 5000) {
   const selector = 'div[contenteditable="true"], textarea, input[type="text"]';
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     if (shouldStop()) return null;
     const loc = page.locator(selector);
-    const cnt = await loc.count().catch(() => 0);
+    const cnt = await withTimeout(loc.count(), 1500, 0);
     if (cnt > 0) {
-      const visible = await loc
-        .first()
-        .isVisible()
-        .catch(() => false);
+      const visible = await withTimeout(loc.first().isVisible(), 1500, false);
       if (visible) return loc;
     }
     await sleep(250);
@@ -156,13 +155,13 @@ async function sleepWithStop(ms, shouldStop) {
   return shouldStop();
 }
 
-async function waitForPadletBoardReady(page, shouldStop, maxWaitMs = 40000) {
+async function waitForPadletBoardReady(page, shouldStop, maxWaitMs = 30000) {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     if (shouldStop()) return { ready: false, stopped: true };
 
-    const isReady = await page
-      .evaluate(() => {
+    const isReady = await withTimeout(
+      page.evaluate(() => {
         const textAll = (document.body && document.body.innerText) || "";
         if (textAll.includes("セクション") || textAll.includes("投稿")) {
           const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
@@ -178,15 +177,17 @@ async function waitForPadletBoardReady(page, shouldStop, maxWaitMs = 40000) {
           });
         }
         return false;
-      })
-      .catch(() => false);
+      }),
+      2000,
+      false
+    );
 
     if (isReady) {
-      const stopped = await sleepWithStop(1200, shouldStop);
+      const stopped = await sleepWithStop(1000, shouldStop);
       return { ready: true, stopped };
     }
 
-    const stopped = await sleepWithStop(800, shouldStop);
+    const stopped = await sleepWithStop(700, shouldStop);
     if (stopped) return { ready: false, stopped: true };
   }
 
@@ -194,8 +195,8 @@ async function waitForPadletBoardReady(page, shouldStop, maxWaitMs = 40000) {
 }
 
 async function inspectSections(page) {
-  return page
-    .evaluate(() => {
+  return withTimeout(
+    page.evaluate(() => {
       const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, div, span, p"));
       const seen = new Set();
       const sections = [];
@@ -217,23 +218,9 @@ async function inspectSections(page) {
 
       sections.sort((a, b) => a.centerX - b.centerX);
       return { sections };
-    })
-    .catch(() => ({ sections: [] }));
-}
-
-function isSectionCreationButton(btn) {
-  const t = (btn.innerText || "").trim().toLowerCase();
-  const a = (btn.getAttribute("aria-label") || "").toLowerCase();
-  const title = (btn.getAttribute("title") || "").toLowerCase();
-  const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
-  const combined = `${t} ${a} ${title} ${testid}`;
-
-  return (
-    combined.includes("セクションを追加") ||
-    combined.includes("add section") ||
-    combined.includes("new section") ||
-    combined.includes("create section") ||
-    combined.includes("section")
+    }),
+    2500,
+    { sections: [] }
   );
 }
 
@@ -241,8 +228,8 @@ async function clickAddButtonForSection(page, secIdx, sectionObj) {
   const targetCenterX =
     sectionObj && typeof sectionObj.centerX === "number" ? sectionObj.centerX : null;
 
-  return page
-    .evaluate(({ idx, centerX }) => {
+  return withTimeout(
+    page.evaluate(({ idx, centerX }) => {
       const allBtns = Array.from(
         document.querySelectorAll('button, [role="button"], [data-testid*="add"]')
       );
@@ -283,7 +270,6 @@ async function clickAddButtonForSection(page, secIdx, sectionObj) {
         );
       };
 
-      // 1. セクション列のX座標付近にある投稿追加ボタンを探す
       if (centerX !== null) {
         const columnPlusBtns = allBtns
           .filter((btn) => {
@@ -309,7 +295,6 @@ async function clickAddButtonForSection(page, secIdx, sectionObj) {
         }
       }
 
-      // 2. 画面全体の投稿追加ボタン（+ 投稿 など）を探す
       const generalBtns = allBtns.filter((btn) => isPostAddLike(btn));
       if (generalBtns.length === 0) {
         return false;
@@ -319,8 +304,53 @@ async function clickAddButtonForSection(page, secIdx, sectionObj) {
       target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
       target.click();
       return true;
-    }, { idx: secIdx, centerX: targetCenterX })
-    .catch(() => false);
+    }, { idx: secIdx, centerX: targetCenterX }),
+    2500,
+    false
+  );
+}
+
+async function clickPublishAndVerify(page) {
+  const clicked = await withTimeout(
+    page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+      for (const b of buttons) {
+        if (b.disabled || b.getAttribute("aria-disabled") === "true") continue;
+        const t = (b.innerText || "").trim();
+        const a = (b.getAttribute("aria-label") || "").toLowerCase();
+        const testid = (b.getAttribute("data-testid") || "").toLowerCase();
+        const rect = b.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          if (
+            t === "公開" ||
+            t === "Publish" ||
+            t.includes("公開") ||
+            t.includes("Publish") ||
+            t.includes("送信") ||
+            a.includes("publish") ||
+            a.includes("submit") ||
+            a.includes("send") ||
+            testid.includes("publish") ||
+            testid.includes("submit")
+          ) {
+            b.scrollIntoView({ behavior: "instant", block: "center" });
+            b.click();
+            return true;
+          }
+        }
+      }
+      return false;
+    }),
+    2500,
+    false
+  );
+
+  if (!clicked) {
+    await withTimeout(page.keyboard.press("Control+Enter"), 1500, null);
+  }
+
+  await sleep(1200);
+  return clicked;
 }
 
 process.on("unhandledRejection", (reason) => {
@@ -416,16 +446,24 @@ app.post("/run", async (req, res) => {
   );
 
   try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--no-zygote"
-      ]
-    });
+    browser = await withTimeout(
+      chromium.launch({
+        headless: true,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu",
+          "--no-zygote"
+        ]
+      }),
+      25000,
+      null
+    );
+
+    if (!browser) {
+      throw new Error("ブラウザの起動がタイムアウトしました。");
+    }
 
     const cookies = normalizeCookies(cookie, parsedUrl.toString());
     const contextOptions = {
@@ -452,14 +490,25 @@ app.post("/run", async (req, res) => {
       contextOptions.storageState = authFile;
     }
 
-    context = await browser.newContext(contextOptions);
-    page = await context.newPage();
+    context = await withTimeout(browser.newContext(contextOptions), 15000, null);
+    if (!context) {
+      throw new Error("ブラウザコンテキストの作成がタイムアウトしました。");
+    }
+
+    page = await withTimeout(context.newPage(), 15000, null);
+    if (!page) {
+      throw new Error("ページの作成がタイムアウトしました。");
+    }
 
     if (shouldStop()) {
       stoppedByUser = true;
     } else {
-      await page.goto(parsedUrl.toString(), { waitUntil: "domcontentloaded", timeout: 60000 });
-      const boardWait = await waitForPadletBoardReady(page, shouldStop, 40000);
+      await withTimeout(
+        page.goto(parsedUrl.toString(), { waitUntil: "domcontentloaded", timeout: 45000 }),
+        48000,
+        null
+      );
+      const boardWait = await waitForPadletBoardReady(page, shouldStop, 30000);
       stoppedByUser = boardWait.stopped;
     }
 
@@ -489,7 +538,7 @@ app.post("/run", async (req, res) => {
             };
             const sectionName = `Section ${secIdx + 1}`;
             try {
-              await page.keyboard.press("Escape").catch(() => {});
+              await withTimeout(page.keyboard.press("Escape"), 1000, null);
               await sleep(250);
 
               const clickedAdd = await clickAddButtonForSection(page, secIdx, secObj);
@@ -505,7 +554,7 @@ app.post("/run", async (req, res) => {
                 continue;
               }
 
-              const editables = await waitForPostEditor(page, shouldStop, 6000);
+              const editables = await waitForPostEditor(page, shouldStop, 5000);
               if (shouldStop()) {
                 stoppedByUser = true;
                 break;
@@ -520,11 +569,11 @@ app.post("/run", async (req, res) => {
                   detail: "投稿フォームの入力欄が開きませんでした",
                   timestamp: new Date().toISOString()
                 });
-                await page.keyboard.press("Escape").catch(() => {});
+                await withTimeout(page.keyboard.press("Escape"), 1000, null);
                 continue;
               }
 
-              const editableCount = await editables.count().catch(() => 0);
+              const editableCount = await withTimeout(editables.count(), 1500, 0);
               if (editableCount > 0) {
                 await setEditableValueExact(editables.nth(0), titleMessage);
               }
@@ -532,67 +581,24 @@ app.post("/run", async (req, res) => {
                 await setEditableValueExact(editables.nth(1), customMessage);
               }
 
-              if (await sleepWithStop(600, shouldStop)) {
+              if (await sleepWithStop(500, shouldStop)) {
                 stoppedByUser = true;
                 break;
               }
 
               if (imagePath && fs.existsSync(imagePath)) {
-                try {
-                  const fileInput = page.locator('input[type="file"]').first();
-                  if ((await fileInput.count().catch(() => 0)) > 0) {
-                    await fileInput.setInputFiles(imagePath, { timeout: 6000 });
-                    if (await sleepWithStop(1500, shouldStop)) {
-                      stoppedByUser = true;
-                      break;
-                    }
+                const fileInput = page.locator('input[type="file"]').first();
+                const fileCount = await withTimeout(fileInput.count(), 1500, 0);
+                if (fileCount > 0) {
+                  await withTimeout(fileInput.setInputFiles(imagePath), 5000, null);
+                  if (await sleepWithStop(1200, shouldStop)) {
+                    stoppedByUser = true;
+                    break;
                   }
-                } catch (imgErr) {
-                  logs.push({
-                    type: "post",
-                    section: sectionName,
-                    attempt: roundNum,
-                    status: "error",
-                    detail: `画像アップロードスキップ: ${imgErr.message.split("\n")[0]}`,
-                    timestamp: new Date().toISOString()
-                  });
                 }
               }
 
-              const pubClicked = await page
-                .evaluate(() => {
-                  const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-                  for (const b of buttons) {
-                    const t = (b.innerText || "").trim();
-                    const a = (b.getAttribute("aria-label") || "").toLowerCase();
-                    const testid = (b.getAttribute("data-testid") || "").toLowerCase();
-                    const cls = typeof b.className === "string" ? b.className : "";
-                    const rect = b.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0 && rect.x > window.innerWidth / 2) {
-                      if (
-                        t.includes("公開") ||
-                        t.includes("Publish") ||
-                        t.includes("送信") ||
-                        a.includes("publish") ||
-                        a.includes("submit") ||
-                        a.includes("send") ||
-                        testid.includes("publish") ||
-                        testid.includes("submit") ||
-                        cls.includes("primary") ||
-                        cls.includes("submit")
-                      ) {
-                        b.click();
-                        return true;
-                      }
-                    }
-                  }
-                  return false;
-                })
-                .catch(() => false);
-
-              if (!pubClicked) {
-                await page.keyboard.press("Control+Enter").catch(() => {});
-              }
+              const pubClicked = await clickPublishAndVerify(page);
 
               logs.push({
                 type: "post",
@@ -600,17 +606,17 @@ app.post("/run", async (req, res) => {
                 attempt: roundNum,
                 status: "ok",
                 detail: pubClicked
-                  ? `${secObj.title} へ投稿を送信しました`
-                  : `${secObj.title} へショートカットで投稿を送信しました`,
+                  ? `${secObj.title} へ公開ボタンで送信しました`
+                  : `${secObj.title} へショートカットで送信しました`,
                 timestamp: new Date().toISOString()
               });
 
-              if (await sleepWithStop(2500, shouldStop)) {
+              if (await sleepWithStop(2000, shouldStop)) {
                 stoppedByUser = true;
                 break;
               }
             } catch (err) {
-              await page.keyboard.press("Escape").catch(() => {});
+              await withTimeout(page.keyboard.press("Escape"), 1000, null);
               logs.push({
                 type: "post",
                 section: sectionName,
@@ -633,8 +639,8 @@ app.post("/run", async (req, res) => {
             }
 
             try {
-              const opened = await page
-                .evaluate(() => {
+              const opened = await withTimeout(
+                page.evaluate(() => {
                   const allEls = Array.from(
                     document.querySelectorAll('button, [role="button"], span, div')
                   );
@@ -654,19 +660,22 @@ app.post("/run", async (req, res) => {
                     }
                   }
                   return false;
-                })
-                .catch(() => false);
+                }),
+                2000,
+                false
+              );
 
               if (!opened) break;
 
-              if (await sleepWithStop(1000, shouldStop)) {
+              if (await sleepWithStop(900, shouldStop)) {
                 stoppedByUser = true;
                 break;
               }
 
               const editor = page.locator('div[contenteditable="true"], textarea').last();
-              if ((await editor.count().catch(() => 0)) === 0) {
-                await page.keyboard.press("Escape").catch(() => {});
+              const edCount = await withTimeout(editor.count(), 1500, 0);
+              if (edCount === 0) {
+                await withTimeout(page.keyboard.press("Escape"), 1000, null);
                 break;
               }
 
@@ -677,13 +686,13 @@ app.post("/run", async (req, res) => {
                 }
 
                 await setEditableValueExact(editor, commentMessage);
-                if (await sleepWithStop(600, shouldStop)) {
+                if (await sleepWithStop(500, shouldStop)) {
                   stoppedByUser = true;
                   break;
                 }
 
-                const sentByButton = await page
-                  .evaluate(() => {
+                const sentByButton = await withTimeout(
+                  page.evaluate(() => {
                     const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
                     for (const b of buttons) {
                       const t = (b.innerText || "").trim();
@@ -702,11 +711,13 @@ app.post("/run", async (req, res) => {
                       }
                     }
                     return false;
-                  })
-                  .catch(() => false);
+                  }),
+                  2000,
+                  false
+                );
 
                 if (!sentByButton) {
-                  await page.keyboard.press("Enter").catch(() => {});
+                  await withTimeout(page.keyboard.press("Enter"), 1500, null);
                 }
 
                 logs.push({
@@ -718,7 +729,7 @@ app.post("/run", async (req, res) => {
                   timestamp: new Date().toISOString()
                 });
 
-                if (await sleepWithStop(1500, shouldStop)) {
+                if (await sleepWithStop(1200, shouldStop)) {
                   stoppedByUser = true;
                   break;
                 }
@@ -726,7 +737,7 @@ app.post("/run", async (req, res) => {
 
               if (stoppedByUser) break;
             } catch (commentErr) {
-              await page.keyboard.press("Escape").catch(() => {});
+              await withTimeout(page.keyboard.press("Escape"), 1000, null);
               logs.push({
                 type: "comment",
                 section: `round-${roundNum}/post-${i + 1}`,
@@ -746,8 +757,12 @@ app.post("/run", async (req, res) => {
         if (stoppedByUser) break;
 
         if (roundNum < totalRounds) {
-          await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
-          const reloadWait = await waitForPadletBoardReady(page, shouldStop, 40000);
+          await withTimeout(
+            page.reload({ waitUntil: "domcontentloaded", timeout: 45000 }),
+            48000,
+            null
+          );
+          const reloadWait = await waitForPadletBoardReady(page, shouldStop, 30000);
           stoppedByUser = reloadWait.stopped;
           if (stoppedByUser) break;
         }
@@ -756,7 +771,7 @@ app.post("/run", async (req, res) => {
 
     const videoObj = doVideo && page ? page.video() : null;
     if (context) {
-      await withTimeout(context.close(), 7000, null);
+      await withTimeout(context.close(), 5000, null);
       context = null;
       page = null;
     }
@@ -764,7 +779,7 @@ app.post("/run", async (req, res) => {
     let videoBase64 = null;
     let videoFileName = null;
     if (videoObj) {
-      const savedPath = await withTimeout(videoObj.path(), 5000, null);
+      const savedPath = await withTimeout(videoObj.path(), 4000, null);
       if (savedPath && fs.existsSync(savedPath)) {
         const stat = fs.statSync(savedPath);
         if (stat.size > 0 && stat.size <= MAX_VIDEO_BYTES) {
@@ -776,7 +791,7 @@ app.post("/run", async (req, res) => {
     }
 
     if (browser) {
-      await withTimeout(browser.close(), 5000, null);
+      await withTimeout(browser.close(), 4000, null);
       browser = null;
     }
 
@@ -811,10 +826,10 @@ app.post("/run", async (req, res) => {
   } finally {
     activeJobs.delete(jobId);
     if (context) {
-      await withTimeout(context.close().catch(() => {}), 3000, null);
+      await withTimeout(context.close(), 2500, null);
     }
     if (browser) {
-      await withTimeout(browser.close().catch(() => {}), 3000, null);
+      await withTimeout(browser.close(), 2500, null);
     }
     if (authFile) {
       cleanupFile(authFile);
