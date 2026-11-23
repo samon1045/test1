@@ -1,200 +1,316 @@
+const express = require("express");
+const cors = require("cors");
+const { chromium } = require("playwright");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const { runPosts } = require("./post");
+const { runComments } = require("./comment");
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+  })
+);
+app.use(express.json({ limit: "2mb" }));
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function runComments(page, { message, commentMessage, commentRepeat = 1, maxPosts = 50 }) {
-  const logs = [];
-  const textToComment = (commentMessage && commentMessage.trim()) || message || "test";
-  const repeatPerPost = Math.max(1, Math.min(10, Number(commentRepeat) || 1));
-  let sentCount = 0;
+function normalizeCookies(rawCookie, targetUrl = "https://padlet.com") {
+  if (!rawCookie) return [];
 
-  await page.evaluate(() => {
-    const cards = Array.from(
-      document.querySelectorAll('[data-testid*="post"], article, [class*="post-card"], [class*="card"]')
-    );
-    cards.forEach((card, idx) => {
-      if (!card.dataset.samonPostId) {
-        card.dataset.samonPostId = `post-${idx + 1}`;
-      }
-    });
-  });
-
-  const processedPostIds = new Set();
-  let stagnantRounds = 0;
-  let postIndex = 0;
-
-  while (postIndex < maxPosts) {
-    const targetInfo = await page.evaluate((doneIds) => {
-      const doneSet = new Set(doneIds);
-
-      const cards = Array.from(
-        document.querySelectorAll('[data-testid*="post"], article, [class*="post-card"], [class*="card"]')
-      );
-
-      for (let i = 0; i < cards.length; i++) {
-        const card = cards[i];
-        const postId = card.dataset.samonPostId || `card-${i + 1}`;
-        if (doneSet.has(postId)) continue;
-
-        const triggers = Array.from(
-          card.querySelectorAll('button, [role="button"], span, div, input, textarea')
-        );
-        for (const el of triggers) {
-          const rect = el.getBoundingClientRect();
-          const t = (el.innerText || "").trim();
-          const a = (el.getAttribute("aria-label") || "").toLowerCase();
-          const p = (el.getAttribute("placeholder") || "").toLowerCase();
-          const isMatch =
-            t === "Add comment" ||
-            t === "コメントを追加" ||
-            t.includes("Add comment") ||
-            t.includes("コメントを追加") ||
-            a.includes("add comment") ||
-            a.includes("comment") ||
-            p.includes("comment") ||
-            p.includes("コメント");
-
-          if (isMatch && rect.width > 0 && rect.height > 0 && el.children.length <= 3) {
-            el.scrollIntoView({ behavior: "instant", block: "center" });
-            el.click();
-            return { found: true, postId, label: postId };
-          }
-        }
-      }
-
-      const allTriggers = Array.from(document.querySelectorAll('button, [role="button"], span, div'));
-      for (let i = 0; i < allTriggers.length; i++) {
-        const el = allTriggers[i];
-        if (el.dataset.samonCommented === "1") continue;
-        const rect = el.getBoundingClientRect();
-        const t = (el.innerText || "").trim();
-        const a = (el.getAttribute("aria-label") || "").toLowerCase();
-        const isMatch =
-          t === "Add comment" ||
-          t === "コメントを追加" ||
-          t.includes("Add comment") ||
-          t.includes("コメントを追加") ||
-          a.includes("add comment");
-
-        if (isMatch && rect.width > 0 && rect.height > 0 && el.children.length <= 2) {
-          const fallbackId = `trigger-${i + 1}`;
-          if (doneSet.has(fallbackId)) continue;
-          el.dataset.samonCommented = "1";
-          el.scrollIntoView({ behavior: "instant", block: "center" });
-          el.click();
-          return { found: true, postId: fallbackId, label: fallbackId };
-        }
-      }
-
-      return { found: false, postId: null, label: null };
-    }, Array.from(processedPostIds));
-
-    if (!targetInfo.found) {
-      const scrolled = await page.evaluate(() => {
-        const before = window.scrollY;
-        window.scrollBy(0, 700);
-        return window.scrollY > before;
-      });
-
-      if (scrolled) {
-        stagnantRounds = 0;
-        await sleep(1000);
-        continue;
-      }
-
-      stagnantRounds++;
-      if (stagnantRounds >= 2) {
-        break;
-      }
-      await sleep(800);
-      continue;
+  let defaultDomain = ".padlet.com";
+  try {
+    const u = new URL(targetUrl);
+    if (u.hostname) {
+      defaultDomain = u.hostname.startsWith("www.")
+        ? u.hostname.slice(3)
+        : "." + u.hostname.replace(/^\./, "");
     }
+  } catch (_) {}
 
-    stagnantRounds = 0;
-    processedPostIds.add(targetInfo.postId);
-    postIndex++;
-    await sleep(900);
+  try {
+    const parsed = typeof rawCookie === "string" ? JSON.parse(rawCookie) : rawCookie;
+    const arr = Array.isArray(parsed)
+      ? Array.isArray(parsed[0])
+        ? parsed[0]
+        : parsed
+      : null;
 
-    for (let r = 1; r <= repeatPerPost; r++) {
-      try {
-        const editor = page.locator('div[contenteditable="true"], textarea, input[type="text"]').last();
-        if ((await editor.count()) === 0) {
-          await page.keyboard.press("Escape");
-          logs.push({
-            type: "comment",
-            section: targetInfo.label,
-            attempt: r,
-            status: "error",
-            detail: `${targetInfo.label} (${r}/${repeatPerPost}回目) - コメント入力欄が見つかりませんでした`,
-            timestamp: new Date().toISOString()
-          });
-          break;
-        }
-
-        await editor.click();
-        await editor.fill(textToComment);
-        await sleep(400);
-
-        const sentByButton = await page.evaluate(() => {
-          const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-          for (const b of buttons) {
-            const t = (b.innerText || "").trim();
-            const a = (b.getAttribute("aria-label") || "").toLowerCase();
-            const rect = b.getBoundingClientRect();
-            if (
-              rect.width > 0 &&
-              rect.height > 0 &&
-              (t === "コメント" ||
-                t === "Comment" ||
-                t === "送信" ||
-                t.includes("コメント") ||
-                a.includes("send") ||
-                a.includes("submit comment") ||
-                a.includes("送信"))
-            ) {
-              b.click();
-              return true;
-            }
+    if (Array.isArray(arr)) {
+      return arr
+        .filter((c) => c && c.name && c.value !== undefined)
+        .map((c) => {
+          const cookieObj = {
+            name: String(c.name),
+            value: String(c.value),
+            domain: c.domain || defaultDomain,
+            path: c.path || "/",
+            httpOnly: Boolean(c.httpOnly),
+            secure: c.secure !== undefined ? Boolean(c.secure) : true
+          };
+          if (c.sameSite && /^(Strict|Lax|None)$/i.test(String(c.sameSite))) {
+            const s = String(c.sameSite).toLowerCase();
+            cookieObj.sameSite = s === "strict" ? "Strict" : s === "none" ? "None" : "Lax";
           }
-          return false;
+          if (typeof c.expirationDate === "number" && Number.isFinite(c.expirationDate)) {
+            cookieObj.expires = Math.floor(c.expirationDate);
+          } else if (typeof c.expires === "number" && Number.isFinite(c.expires)) {
+            cookieObj.expires = Math.floor(c.expires);
+          }
+          return cookieObj;
         });
-
-        if (!sentByButton) {
-          await page.keyboard.press("Enter");
-        }
-
-        sentCount++;
-        logs.push({
-          type: "comment",
-          section: targetInfo.label,
-          attempt: r,
-          status: "ok",
-          detail: `${targetInfo.label} (${r}/${repeatPerPost}回目) へコメント送信完了`,
-          timestamp: new Date().toISOString()
-        });
-
-        await sleep(1100);
-      } catch (err) {
-        logs.push({
-          type: "comment",
-          section: targetInfo.label,
-          attempt: r,
-          status: "error",
-          detail: `${targetInfo.label} (${r}/${repeatPerPost}回目) - ${
-            err && err.message ? err.message.split("\n")[0] : "コメント送信失敗"
-          }`,
-          timestamp: new Date().toISOString()
-        });
-        await page.keyboard.press("Escape").catch(() => {});
-        await sleep(600);
-      }
     }
+  } catch (_) {}
+
+  if (typeof rawCookie === "string" && rawCookie.includes("=")) {
+    return rawCookie
+      .split(";")
+      .map((pair) => pair.trim())
+      .filter(Boolean)
+      .map((pair) => {
+        const eqIdx = pair.indexOf("=");
+        if (eqIdx <= 0) return null;
+        return {
+          name: pair.slice(0, eqIdx).trim(),
+          value: pair.slice(eqIdx + 1).trim(),
+          domain: defaultDomain,
+          path: "/",
+          secure: true
+        };
+      })
+      .filter(Boolean);
   }
 
-  return {
-    sentComments: sentCount,
-    logs
-  };
+  return [];
 }
 
-module.exports = {
-  runComments
-};
+async function downloadGifToTemp(gifUrl) {
+  if (!gifUrl || !/^https?:\/\//i.test(gifUrl.trim())) return null;
+  try {
+    const res = await fetch(gifUrl.trim());
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length === 0) return null;
+    const tmpFile = path.join(os.tmpdir(), `padlet_gif_${Date.now()}.gif`);
+    fs.writeFileSync(tmpFile, buf);
+    return tmpFile;
+  } catch (_) {
+    return null;
+  }
+}
+
+function cleanupDir(dirPath) {
+  if (!dirPath || !fs.existsSync(dirPath)) return;
+  try {
+    fs.rmSync(dirPath, { recursive: true, force: true });
+  } catch (_) {}
+}
+
+// ボードのUI（+ボタンやセクション見出し）が実際に描画されるまで最大35秒待つ
+async function waitForBoardReady(page, timeoutMs = 35000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const ready = await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+      const hasActionBtn = btns.some((b) => {
+        const r = b.getBoundingClientRect();
+        const t = (b.innerText || "").trim();
+        const a = (b.getAttribute("aria-label") || "").toLowerCase();
+        return (
+          r.width > 0 &&
+          r.height > 0 &&
+          (t === "+" || t.includes("投稿") || a.includes("add") || a.includes("post"))
+        );
+      });
+      return hasActionBtn;
+    });
+    if (ready) {
+      await sleep(2000);
+      return true;
+    }
+    await sleep(1000);
+  }
+  return false;
+}
+
+app.get("/", (req, res) => {
+  res.json({ status: "ok", mode: "playwright-ready" });
+});
+
+app.post("/run", async (req, res) => {
+  const {
+    roomUrl = "",
+    message = "",
+    commentMessage = "",
+    gifUrl = "",
+    cookie = "",
+    repeat = 2,
+    commentRepeat = 1,
+    enablePost = true,
+    enableComment = false
+  } = req.body || {};
+
+  const trimmedUrl = roomUrl.trim();
+  if (!trimmedUrl) {
+    return res.status(400).json({ ok: false, error: "roomUrl が指定されていません。" });
+  }
+
+  const doPost = Boolean(enablePost);
+  const doComment = Boolean(enableComment);
+
+  if (!doPost && !doComment) {
+    return res.status(400).json({
+      ok: false,
+      error: "投稿（enablePost）とコメント（enableComment）が両方オフになっています。"
+    });
+  }
+
+  const count = Math.max(1, Math.min(10, Number(repeat) || 2));
+  const cRepeat = Math.max(1, Math.min(10, Number(commentRepeat) || 1));
+  const logs = [];
+  let browser;
+  let context;
+  let page;
+  let gifFilePath = null;
+  let detectedSections = 0;
+  const videoDir = fs.mkdtempSync(path.join(os.tmpdir(), "padlet_rec_"));
+
+  try {
+    if (doPost) {
+      gifFilePath = await downloadGifToTemp(gifUrl);
+    }
+
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu"
+      ]
+    });
+
+    context = await browser.newContext({
+      viewport: { width: 1280, height: 720 },
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+      recordVideo: {
+        dir: videoDir,
+        size: { width: 1280, height: 720 }
+      }
+    });
+
+    const cookies = normalizeCookies(cookie, trimmedUrl);
+    if (cookies.length > 0) {
+      await context.addCookies(cookies);
+    }
+
+    page = await context.newPage();
+    await page.goto(trimmedUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await waitForBoardReady(page, 35000);
+
+    if (doPost) {
+      const postResult = await runPosts(page, {
+        message,
+        gifFilePath,
+        repeat: count
+      });
+      detectedSections = postResult.detectedSections;
+      logs.push(...postResult.logs);
+    }
+
+    if (doComment) {
+      if (doPost) {
+        await sleep(2000);
+      }
+      const commentResult = await runComments(page, {
+        message,
+        commentMessage,
+        commentRepeat: cRepeat,
+        maxPosts: 50
+      });
+      logs.push(...commentResult.logs);
+    }
+
+    const videoObj = page.video();
+    await page.close();
+    await context.close();
+    context = null;
+
+    let videoBase64 = null;
+    let videoFileName = null;
+    if (videoObj) {
+      const savedPath = await videoObj.path().catch(() => null);
+      if (savedPath && fs.existsSync(savedPath)) {
+        const buf = fs.readFileSync(savedPath);
+        if (buf.length > 0) {
+          videoBase64 = buf.toString("base64");
+          videoFileName = `samon_run_${Date.now()}.webm`;
+        }
+      }
+    }
+
+    await browser.close();
+    browser = null;
+
+    const successCount = logs.filter((l) => l.status === "ok").length;
+
+    return res.json({
+      ok: true,
+      enablePost: doPost,
+      enableComment: doComment,
+      detectedSections,
+      cookiesLoaded: cookies.length,
+      totalSteps: logs.length,
+      successCount,
+      logs,
+      videoBase64,
+      videoMimeType: videoBase64 ? "video/webm" : null,
+      videoFileName
+    });
+  } catch (err) {
+    if (context) {
+      try {
+        await context.close();
+      } catch (_) {}
+    }
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (_) {}
+    }
+    return res.status(500).json({
+      ok: false,
+      error: err && err.message ? err.message : "Playwright実行中にエラーが発生しました。",
+      logs
+    });
+  } finally {
+    cleanupDir(videoDir);
+    if (gifFilePath && fs.existsSync(gifFilePath)) {
+      try {
+        fs.unlinkSync(gifFilePath);
+      } catch (_) {}
+    }
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
