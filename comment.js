@@ -13,7 +13,6 @@ async function findCommentInput(page, timeoutMs = 5500) {
       const visible = await item.isVisible().catch(() => false);
       if (visible) {
         const box = await item.boundingBox().catch(() => null);
-        // 画面上部の検索バー（y < 80）は除外
         if (box && box.width > 40 && box.height > 15 && box.y > 80) {
           return item;
         }
@@ -77,12 +76,11 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
           if (isMatch && rect.width > 0 && rect.height > 0 && el.children.length <= 4) {
             el.scrollIntoView({ behavior: "instant", block: "center" });
             el.click();
-            return { found: true, postId, label: postId, cardClicked: false };
+            return { found: true, postId, label: postId };
           }
         }
       }
 
-      // 「コメントを追加」要素がカード外や別構造にある場合のフォールバック
       const allTriggers = Array.from(document.querySelectorAll('button, [role="button"], span, div, a'));
       for (let i = 0; i < allTriggers.length; i++) {
         const el = allTriggers[i];
@@ -101,11 +99,11 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
           el.dataset.samonCommented = "1";
           el.scrollIntoView({ behavior: "instant", block: "center" });
           el.click();
-          return { found: true, postId: fallbackId, label: fallbackId, cardClicked: false };
+          return { found: true, postId: fallbackId, label: fallbackId };
         }
       }
 
-      return { found: false, postId: null, label: null, cardClicked: false };
+      return { found: false, postId: null, label: null };
     }, Array.from(processedPostIds));
 
     if (!targetInfo.found) {
@@ -138,7 +136,6 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
       try {
         let editor = await findCommentInput(page, 4000);
 
-        // 見つからない場合、投稿カード自体をクリックして詳細/コメント欄が開くか試す
         if (!editor && r === 1) {
           await page.evaluate((pid) => {
             const card = document.querySelector(`[data-samon-post-id="${pid}"]`);
