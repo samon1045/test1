@@ -127,8 +127,9 @@ async function setEditableValueExact(locator, text) {
   await withTimeout(locator.fill(text), 3000, null);
 }
 
-async function waitForPostEditor(page, shouldStop, maxWaitMs = 5000) {
-  const selector = 'div[contenteditable="true"], textarea, input[type="text"]';
+async function waitForPostEditor(page, shouldStop, maxWaitMs = 6000) {
+  const selector =
+    'textarea:visible, div[contenteditable="true"]:visible, input[type="text"]:visible, [role="textbox"]:visible';
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     if (shouldStop()) return null;
@@ -140,6 +141,80 @@ async function waitForPostEditor(page, shouldStop, maxWaitMs = 5000) {
     }
     await sleep(250);
   }
+  return null;
+}
+
+async function findCommentEditorLocator(page, maxWaitMs = 4000) {
+  const selector =
+    'textarea:visible, div[contenteditable="true"]:visible, input[type="text"]:visible, [role="textbox"]:visible';
+  const start = Date.now();
+
+  while (Date.now() - start < maxWaitMs) {
+    const loc = page.locator(selector);
+    const cnt = await withTimeout(loc.count(), 1500, 0);
+
+    if (cnt > 0) {
+      let bestIdx = -1;
+      let bestScore = -9999;
+
+      for (let i = 0; i < cnt; i++) {
+        const item = loc.nth(i);
+        const info = await withTimeout(
+          item.evaluate((el) => {
+            const r = el.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return null;
+
+            const ph = (el.getAttribute("placeholder") || "").toLowerCase();
+            const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+            const dataPh = (el.getAttribute("data-placeholder") || "").toLowerCase();
+            const container = el.closest(
+              '[role="dialog"], [class*="comment"], [class*="Comment"], [class*="modal"], [class*="Modal"], form, aside'
+            );
+            const containerText = ((container && container.innerText) || "").toLowerCase();
+
+            const isCommentHint =
+              ph.includes("comment") ||
+              ph.includes("コメント") ||
+              aria.includes("comment") ||
+              aria.includes("コメント") ||
+              dataPh.includes("comment") ||
+              dataPh.includes("コメント") ||
+              containerText.includes("add comment") ||
+              containerText.includes("コメントを追加") ||
+              containerText.includes("comments") ||
+              containerText.includes("コメント");
+
+            return {
+              isCommentHint,
+              hasContainer: Boolean(container),
+              y: r.y
+            };
+          }),
+          1500,
+          null
+        );
+
+        if (!info) continue;
+
+        let score = 0;
+        if (info.isCommentHint) score += 200;
+        if (info.hasContainer) score += 40;
+        if (info.y > 100) score += 10;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = i;
+        }
+      }
+
+      if (bestIdx >= 0 && bestScore >= 200) {
+        return loc.nth(bestIdx);
+      }
+    }
+
+    await sleep(250);
+  }
+
   return null;
 }
 
@@ -155,7 +230,7 @@ async function sleepWithStop(ms, shouldStop) {
   return shouldStop();
 }
 
-async function waitForPadletBoardReady(page, shouldStop, maxWaitMs = 30000) {
+async function waitForPadletBoardReady(page, shouldStop, maxWaitMs = 35000) {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     if (shouldStop()) return { ready: false, stopped: true };
@@ -311,46 +386,77 @@ async function clickAddButtonForSection(page, secIdx, sectionObj) {
 }
 
 async function clickPublishAndVerify(page) {
-  const clicked = await withTimeout(
-    page.evaluate(() => {
-      const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-      for (const b of buttons) {
-        if (b.disabled || b.getAttribute("aria-disabled") === "true") continue;
-        const t = (b.innerText || "").trim();
-        const a = (b.getAttribute("aria-label") || "").toLowerCase();
-        const testid = (b.getAttribute("data-testid") || "").toLowerCase();
-        const rect = b.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          if (
+  let clickedAny = false;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const clicked = await withTimeout(
+      page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+        for (const b of buttons) {
+          if (b.disabled || b.getAttribute("aria-disabled") === "true") continue;
+          const t = (b.innerText || "").trim();
+          const a = (b.getAttribute("aria-label") || "").toLowerCase();
+          const testid = (b.getAttribute("data-testid") || "").toLowerCase();
+          const rect = b.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            if (
+              t === "公開" ||
+              t === "Publish" ||
+              t.includes("公開") ||
+              t.includes("Publish") ||
+              t.includes("送信") ||
+              t.includes("投稿する") ||
+              a.includes("publish") ||
+              a.includes("submit") ||
+              a.includes("send") ||
+              testid.includes("publish") ||
+              testid.includes("submit")
+            ) {
+              b.scrollIntoView({ behavior: "instant", block: "center" });
+              b.click();
+              return true;
+            }
+          }
+        }
+        return false;
+      }),
+      2500,
+      false
+    );
+
+    if (clicked) {
+      clickedAny = true;
+    } else {
+      await withTimeout(page.keyboard.press("Control+Enter"), 1500, null);
+    }
+
+    await sleep(1200);
+
+    const stillOpen = await withTimeout(
+      page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+        return buttons.some((b) => {
+          const r = b.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return false;
+          const t = (b.innerText || "").trim();
+          const a = (b.getAttribute("aria-label") || "").toLowerCase();
+          return (
             t === "公開" ||
             t === "Publish" ||
             t.includes("公開") ||
             t.includes("Publish") ||
-            t.includes("送信") ||
-            a.includes("publish") ||
-            a.includes("submit") ||
-            a.includes("send") ||
-            testid.includes("publish") ||
-            testid.includes("submit")
-          ) {
-            b.scrollIntoView({ behavior: "instant", block: "center" });
-            b.click();
-            return true;
-          }
-        }
-      }
-      return false;
-    }),
-    2500,
-    false
-  );
+            a.includes("publish")
+          );
+        });
+      }),
+      1500,
+      false
+    );
 
-  if (!clicked) {
-    await withTimeout(page.keyboard.press("Control+Enter"), 1500, null);
+    if (!stillOpen) break;
   }
 
-  await sleep(1200);
-  return clicked;
+  return clickedAny;
 }
 
 process.on("unhandledRejection", (reason) => {
@@ -508,7 +614,7 @@ app.post("/run", async (req, res) => {
         48000,
         null
       );
-      const boardWait = await waitForPadletBoardReady(page, shouldStop, 30000);
+      const boardWait = await waitForPadletBoardReady(page, shouldStop, 35000);
       stoppedByUser = boardWait.stopped;
     }
 
@@ -554,7 +660,7 @@ app.post("/run", async (req, res) => {
                 continue;
               }
 
-              const editables = await waitForPostEditor(page, shouldStop, 5000);
+              const editables = await waitForPostEditor(page, shouldStop, 6000);
               if (shouldStop()) {
                 stoppedByUser = true;
                 break;
@@ -672,11 +778,10 @@ app.post("/run", async (req, res) => {
                 break;
               }
 
-              const editor = page.locator('div[contenteditable="true"], textarea').last();
-              const edCount = await withTimeout(editor.count(), 1500, 0);
-              if (edCount === 0) {
+              const editor = await findCommentEditorLocator(page, 4000);
+              if (!editor) {
                 await withTimeout(page.keyboard.press("Escape"), 1000, null);
-                break;
+                continue;
               }
 
               for (let r = 1; r <= cRepeat; r++) {
@@ -762,7 +867,7 @@ app.post("/run", async (req, res) => {
             48000,
             null
           );
-          const reloadWait = await waitForPadletBoardReady(page, shouldStop, 30000);
+          const reloadWait = await waitForPadletBoardReady(page, shouldStop, 35000);
           stoppedByUser = reloadWait.stopped;
           if (stoppedByUser) break;
         }
