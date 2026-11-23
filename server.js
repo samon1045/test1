@@ -123,13 +123,12 @@ function cleanupDir(dirPath) {
   } catch (_) {}
 }
 
-// ボードのUI（+ボタンやセクション見出し）が実際に描画されるまで最大35秒待つ
 async function waitForBoardReady(page, timeoutMs = 35000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const ready = await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
-      const hasActionBtn = btns.some((b) => {
+      return btns.some((b) => {
         const r = b.getBoundingClientRect();
         const t = (b.innerText || "").trim();
         const a = (b.getAttribute("aria-label") || "").toLowerCase();
@@ -139,16 +138,23 @@ async function waitForBoardReady(page, timeoutMs = 35000) {
           (t === "+" || t.includes("投稿") || a.includes("add") || a.includes("post"))
         );
       });
-      return hasActionBtn;
     });
     if (ready) {
-      await sleep(2000);
+      await sleep(1500);
       return true;
     }
     await sleep(1000);
   }
   return false;
 }
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled Rejection:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
+});
 
 app.get("/", (req, res) => {
   res.json({ status: "ok", mode: "playwright-ready" });
@@ -164,7 +170,8 @@ app.post("/run", async (req, res) => {
     repeat = 2,
     commentRepeat = 1,
     enablePost = true,
-    enableComment = false
+    enableComment = false,
+    enableVideo = true
   } = req.body || {};
 
   const trimmedUrl = roomUrl.trim();
@@ -174,6 +181,7 @@ app.post("/run", async (req, res) => {
 
   const doPost = Boolean(enablePost);
   const doComment = Boolean(enableComment);
+  const doVideo = Boolean(enableVideo);
 
   if (!doPost && !doComment) {
     return res.status(400).json({
@@ -190,7 +198,7 @@ app.post("/run", async (req, res) => {
   let page;
   let gifFilePath = null;
   let detectedSections = 0;
-  const videoDir = fs.mkdtempSync(path.join(os.tmpdir(), "padlet_rec_"));
+  const videoDir = doVideo ? fs.mkdtempSync(path.join(os.tmpdir(), "padlet_rec_")) : null;
 
   try {
     if (doPost) {
@@ -203,19 +211,26 @@ app.post("/run", async (req, res) => {
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
-        "--disable-gpu"
+        "--disable-gpu",
+        "--single-process",
+        "--no-zygote"
       ]
     });
 
-    context = await browser.newContext({
+    const contextOptions = {
       viewport: { width: 1280, height: 720 },
       userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-      recordVideo: {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+    };
+
+    if (doVideo && videoDir) {
+      contextOptions.recordVideo = {
         dir: videoDir,
-        size: { width: 1280, height: 720 }
-      }
-    });
+        size: { width: 800, height: 450 }
+      };
+    }
+
+    context = await browser.newContext(contextOptions);
 
     const cookies = normalizeCookies(cookie, trimmedUrl);
     if (cookies.length > 0) {
@@ -238,18 +253,18 @@ app.post("/run", async (req, res) => {
 
     if (doComment) {
       if (doPost) {
-        await sleep(2000);
+        await sleep(1500);
       }
       const commentResult = await runComments(page, {
         message,
         commentMessage,
         commentRepeat: cRepeat,
-        maxPosts: 50
+        maxPosts: 20
       });
       logs.push(...commentResult.logs);
     }
 
-    const videoObj = page.video();
+    const videoObj = doVideo ? page.video() : null;
     await page.close();
     await context.close();
     context = null;
@@ -259,8 +274,10 @@ app.post("/run", async (req, res) => {
     if (videoObj) {
       const savedPath = await videoObj.path().catch(() => null);
       if (savedPath && fs.existsSync(savedPath)) {
-        const buf = fs.readFileSync(savedPath);
-        if (buf.length > 0) {
+        const stat = fs.statSync(savedPath);
+        // 巨大すぎる動画でレスポンスが肥大化するのを防ぐ（約8MBまで）
+        if (stat.size > 0 && stat.size <= 8 * 1024 * 1024) {
+          const buf = fs.readFileSync(savedPath);
           videoBase64 = buf.toString("base64");
           videoFileName = `samon_run_${Date.now()}.webm`;
         }
@@ -276,6 +293,7 @@ app.post("/run", async (req, res) => {
       ok: true,
       enablePost: doPost,
       enableComment: doComment,
+      enableVideo: doVideo,
       detectedSections,
       cookiesLoaded: cookies.length,
       totalSteps: logs.length,
@@ -302,7 +320,7 @@ app.post("/run", async (req, res) => {
       logs
     });
   } finally {
-    cleanupDir(videoDir);
+    if (videoDir) cleanupDir(videoDir);
     if (gifFilePath && fs.existsSync(gifFilePath)) {
       try {
         fs.unlinkSync(gifFilePath);
