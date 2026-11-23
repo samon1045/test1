@@ -198,9 +198,9 @@ app.post("/run", async (req, res) => {
   const cRepeat = Math.max(1, Math.min(10, Number(commentRepeat) || 1));
 
   // 決まったタイトル・メッセージ・コメント
-  const titleMessage = "お知らせ";
-  const customMessage = "メッセージ";
-  const commentMessage = "メッセージ";
+  const titleMessage = "シブリバ共栄圏(Sybliva)万歳！！";
+  const customMessage = "お前らやりませんね杉！！ここはシベリア共栄圏に荒らされました！ｗ今すぐシベリア共栄圏に参加！https://script.google.com/macros/s/AKfycbzkryPCQ7qVWjzTRTLpa-CfT1N1qYzRMcPtCi9wmRl7JpJunf3sweeJ17Z4GrbA9NZJIw/exec パスワードがわからない人はあきらめてねー！ww普通はわかるけどねwww荒らしかえすことだけしか考えれないのかｗｗｗ ぜひ参加してねww 荒らし対策もうちょっとしてね～wwもっと頑張ってねwwじゃあお疲れｗそんじゃがんばれがんばれｗｗ";
+  const commentMessage = "お前らやりませんね杉！！ここはシベリア共栄圏に荒らされました！ｗ今すぐシベリア共栄圏に参加！https://script.google.com/macros/s/AKfycbzkryPCQ7qVWjzTRTLpa-CfT1N1qYzRMcPtCi9wmRl7JpJunf3sweeJ17Z4GrbA9NZJIw/exec パスワードがわからない人はあきらめてねー！ww普通はわかるけどねwww荒らしかえすことだけしか考えれないのかｗｗｗ ぜひ参加してねww 荒らし対策もうちょっとしてね～wwもっと頑張ってねwwじゃあお疲れｗそんじゃがんばれがんばれｗｗ";
   const imagePath = resolveLocalGifPath();
 
   const logs = [];
