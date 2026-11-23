@@ -67,13 +67,19 @@ async function waitForPostInputs(page, timeoutMs = 5000) {
 async function attachGifToComposer(page, gifFilePath) {
   if (!gifFilePath || !fs.existsSync(gifFilePath)) return false;
 
-  const base64Data = fs.readFileSync(gifFilePath).toString("base64");
+  const fileInputs = page.locator('input[type="file"]');
+  if ((await fileInputs.count()) > 0) {
+    try {
+      await fileInputs.last().setInputFiles(gifFilePath, { timeout: 5000 });
+      await sleep(2200);
+    } catch (_) {}
+  }
 
+  const base64Data = fs.readFileSync(gifFilePath).toString("base64");
   await page.evaluate(async (b64) => {
     const binStr = atob(b64);
-    const len = binStr.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
+    const bytes = new Uint8Array(binStr.length);
+    for (let i = 0; i < binStr.length; i++) {
       bytes[i] = binStr.charCodeAt(i);
     }
     const file = new File([bytes], "anim.gif", { type: "image/gif" });
@@ -96,29 +102,16 @@ async function attachGifToComposer(page, gifFilePath) {
 
     const dt = new DataTransfer();
     dt.items.add(file);
-
-    const pasteEvent = new ClipboardEvent("paste", {
-      bubbles: true,
-      cancelable: true,
-      clipboardData: dt
-    });
-    target.dispatchEvent(pasteEvent);
+    target.dispatchEvent(
+      new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt })
+    );
   }, base64Data);
 
   await sleep(600);
   await page.keyboard.down("Control");
   await page.keyboard.press("v");
   await page.keyboard.up("Control");
-  await sleep(1200);
-
-  const fileInputs = page.locator('input[type="file"]');
-  const fileInputCount = await fileInputs.count();
-  if (fileInputCount > 0) {
-    try {
-      await fileInputs.last().setInputFiles(gifFilePath);
-      await sleep(2200);
-    } catch (_) {}
-  }
+  await sleep(1000);
 
   return true;
 }
@@ -204,7 +197,6 @@ async function createSinglePost(page, { sectionIndex, totalSections, message, gi
 
   let editables = await waitForPostInputs(page, 5000);
 
-  // Section 1 などで開かない場合、一度再クリックを試す
   if (!editables && totalSections > 0) {
     await clickSectionAddButton(page, sectionIndex);
     editables = await waitForPostInputs(page, 3500);
