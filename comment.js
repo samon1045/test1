@@ -54,8 +54,6 @@ async function openNextCommentTarget(page, processedKeys) {
         title.includes("comment");
 
       if (!looksLikeCommentTrigger) continue;
-
-      // 大きすぎるコンテナは除外（ボタン／リンク／ラベル相当に絞る）
       if (rect.width > 420 || rect.height > 140) continue;
 
       const clickable =
@@ -67,7 +65,6 @@ async function openNextCommentTarget(page, processedKeys) {
       const r = clickable.getBoundingClientRect();
       if (r.width <= 0 || r.height <= 0) continue;
 
-      // テキスト／aria-labelベース＋相対位置で一意キーを作る
       const labelPart = (
         clickable.innerText ||
         clickable.getAttribute("aria-label") ||
@@ -80,11 +77,10 @@ async function openNextCommentTarget(page, processedKeys) {
 
       const key = `${labelPart}__${Math.round(r.left / 24)}_${Math.round(r.top / 24)}`;
 
-      if (doneSet.has(key) || clickable.dataset.samonCommentDone === "1") {
+      if (doneSet.has(key)) {
         continue;
       }
 
-      clickable.dataset.samonCommentDone = "1";
       clickable.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
 
       const updated = clickable.getBoundingClientRect();
@@ -243,7 +239,12 @@ async function findCommentInputLocator(page, waitMs = 2500) {
 
 async function clickCommentSubmitButton(page) {
   const clickedByEval = await page.evaluate(() => {
-    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+    const dialogOrBox =
+      document.querySelector('[role="dialog"]') ||
+      document.querySelector('[class*="comment"], [class*="Comment"], form, aside') ||
+      document.body;
+
+    const buttons = Array.from(dialogOrBox.querySelectorAll('button, [role="button"]'));
     const exactLabels = new Set(["コメント", "comment", "送信", "send", "post", "投稿"]);
     const partialHints = ["comment", "コメント", "send", "送信", "submit", "post"];
 
