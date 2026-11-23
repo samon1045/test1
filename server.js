@@ -93,18 +93,12 @@ function normalizeCookies(rawCookie, targetUrl = "https://padlet.com") {
   return [];
 }
 
-function resolveLocalGifPath(customGifName = "") {
-  const candidates = [];
-  if (customGifName && String(customGifName).trim()) {
-    const cleaned = String(customGifName).trim().replace(/^[/\\]+/, "");
-    candidates.push(path.join(__dirname, cleaned));
-    candidates.push(path.join(__dirname, path.basename(cleaned)));
-  }
-  candidates.push(
+function resolveLocalGifPath() {
+  const candidates = [
     path.join(__dirname, "_______.gif"),
     path.join(__dirname, "_______ (3).gif"),
     path.join(__dirname, "image.gif")
-  );
+  ];
 
   for (const p of candidates) {
     if (fs.existsSync(p) && fs.statSync(p).isFile()) {
@@ -149,9 +143,8 @@ app.post("/stop", (req, res) => {
     activeJobs.get(jobId).stopped = true;
     return res.json({ ok: true, stopped: true, jobId });
   }
-  // jobId 未指定の場合は実行中ジョブをすべて停止
   let stoppedCount = 0;
-  for (const [id, job] of activeJobs.entries()) {
+  for (const [, job] of activeJobs.entries()) {
     job.stopped = true;
     stoppedCount++;
   }
@@ -162,15 +155,11 @@ app.post("/run", async (req, res) => {
   const {
     jobId: reqJobId = "",
     roomUrl = "",
-    titleMessage = "お知らせ",
-    message = "メッセージ",
-    commentMessage = "",
-    gifFile = "",
     cookie = "",
     repeat = 2,
     commentRepeat = 1,
     enablePost = true,
-    enableComment = false,
+    enableComment = true,
     enableVideo = true
   } = req.body || {};
 
@@ -207,10 +196,12 @@ app.post("/run", async (req, res) => {
 
   const totalRounds = Math.max(1, Math.min(10, Number(repeat) || 2));
   const cRepeat = Math.max(1, Math.min(10, Number(commentRepeat) || 1));
-  const finalTitle = String(titleMessage || "").trim() || "お知らせ";
-  const finalPostMsg = String(message || "").trim() || "メッセージ";
-  const finalCommentMsg = String(commentMessage || "").trim() || finalPostMsg;
-  const imagePath = resolveLocalGifPath(gifFile);
+
+  // 決まったタイトル・メッセージ・コメント
+  const titleMessage = "お知らせ";
+  const customMessage = "メッセージ";
+  const commentMessage = "メッセージ";
+  const imagePath = resolveLocalGifPath();
 
   const logs = [];
   let browser = null;
@@ -363,10 +354,10 @@ app.post("/run", async (req, res) => {
               );
               const editableCount = await editables.count();
               if (editableCount > 0) {
-                await setEditableValueExact(editables.nth(0), finalTitle);
+                await setEditableValueExact(editables.nth(0), titleMessage);
               }
               if (editableCount > 1) {
-                await setEditableValueExact(editables.nth(1), finalPostMsg);
+                await setEditableValueExact(editables.nth(1), customMessage);
               }
 
               if (await sleepWithStop(800, shouldStop)) {
@@ -434,9 +425,7 @@ app.post("/run", async (req, res) => {
                 section: sectionName,
                 attempt: roundNum,
                 status: "ok",
-                detail: pubClicked
-                  ? `タイトル「${finalTitle}」/ メッセージ「${finalPostMsg}」送信`
-                  : `ショートカット送信（タイトル「${finalTitle}」/ メッセージ「${finalPostMsg}」）`,
+                detail: pubClicked ? "投稿を送信しました" : "ショートカットで投稿を送信しました",
                 timestamp: new Date().toISOString()
               });
 
@@ -507,7 +496,7 @@ app.post("/run", async (req, res) => {
                 break;
               }
 
-              await setEditableValueExact(editor, finalCommentMsg);
+              await setEditableValueExact(editor, commentMessage);
               if (await sleepWithStop(800, shouldStop)) {
                 stoppedByUser = true;
                 break;
@@ -543,7 +532,7 @@ app.post("/run", async (req, res) => {
                 section: `round-${roundNum}/post-${i + 1}`,
                 attempt: r,
                 status: "ok",
-                detail: `コメント「${finalCommentMsg}」(${r}/${cRepeat}) 送信`,
+                detail: `コメント送信 (${r}/${cRepeat})`,
                 timestamp: new Date().toISOString()
               });
 
