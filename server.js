@@ -10,9 +10,8 @@ const { sleep, cleanupDir, cleanupFile } = require("./utils");
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const MAX_VIDEO_BYTES = 80 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 35 * 1024 * 1024; // 通信断・メモリ圧迫を防ぐため35MB上限
 
-// 実行中ジョブの中断管理
 const activeJobs = new Map();
 
 app.use(
@@ -160,7 +159,7 @@ async function waitForPadletBoardReady(page, shouldStop, maxWaitMs = 40000) {
   return { ready: false, stopped: shouldStop() };
 }
 
-async function inspectSectionsAndAddButtons(page) {
+async function inspectSections(page) {
   return page.evaluate(() => {
     const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, div, span, p"));
     const sectionTitles = [];
@@ -172,34 +171,7 @@ async function inspectSectionsAndAddButtons(page) {
         sectionTitles.push(t);
       }
     }
-
-    const allBtns = Array.from(
-      document.querySelectorAll('button, [role="button"], [data-testid*="add"]')
-    );
-    const addButtons = allBtns.filter((btn) => {
-      const r = btn.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) return false;
-      const t = (btn.innerText || "").trim();
-      const a = (btn.getAttribute("aria-label") || "").toLowerCase();
-      const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
-      return (
-        t === "+" ||
-        t.includes("投稿") ||
-        t.includes("Add") ||
-        t.includes("追加") ||
-        a.includes("add") ||
-        a.includes("post") ||
-        a.includes("追加") ||
-        a.includes("投稿") ||
-        testid.includes("add") ||
-        testid.includes("post")
-      );
-    });
-
-    return {
-      sectionTitles,
-      addButtonCount: addButtons.length
-    };
+    return { sectionTitles };
   });
 }
 
@@ -229,8 +201,6 @@ async function clickAddButtonForSection(page, secIdx, sectionTitle) {
     });
 
     if (addButtons.length === 0) return false;
-
-    // セクションごとの追加ボタンが複数ある場合は idx 番目、右下の「+ 投稿」1個のみの場合は 0 番目を押す
     const target = addButtons.length > 1 && addButtons[idx] ? addButtons[idx] : addButtons[0];
     target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
     target.click();
@@ -239,7 +209,6 @@ async function clickAddButtonForSection(page, secIdx, sectionTitle) {
 
   if (!clicked) return false;
 
-  // セクション選択UIが出た場合に備えて該当セクション名があればクリック
   if (sectionTitle) {
     await sleep(500);
     await page.evaluate((targetTitle) => {
@@ -279,6 +248,7 @@ app.post("/stop", (req, res) => {
   const { jobId } = req.body || {};
   if (jobId && activeJobs.has(jobId)) {
     activeJobs.get(jobId).stopped = true;
+    console.log(`[STOP] jobId=${jobId}`);
     return res.json({ ok: true, stopped: true, jobId });
   }
   let stoppedCount = 0;
@@ -286,6 +256,7 @@ app.post("/stop", (req, res) => {
     job.stopped = true;
     stoppedCount++;
   }
+  console.log(`[STOP] all count=${stoppedCount}`);
   return res.json({ ok: true, stopped: stoppedCount > 0, stoppedCount });
 });
 
@@ -349,6 +320,7 @@ app.post("/run", async (req, res) => {
   let stoppedByUser = false;
 
   const videoDir = doVideo ? fs.mkdtempSync(path.join(os.tmpdir(), "padlet_rec_")) : null;
+  console.log(`[RUN START] jobId=${jobId} rounds=${totalRounds} post=${doPost} comment=${doComment} video=${doVideo}`);
 
   try {
     browser = await chromium.launch({
@@ -403,9 +375,10 @@ app.post("/run", async (req, res) => {
           stoppedByUser = true;
           break;
         }
+        console.log(`[ROUND ${roundNum}/${totalRounds}] jobId=${jobId}`);
 
         if (doPost) {
-          const info = await inspectSectionsAndAddButtons(page);
+          const info = await inspectSections(page);
           const loopCount = Math.max(info.sectionTitles.length, 1);
           detectedSections = loopCount;
 
@@ -674,6 +647,7 @@ app.post("/run", async (req, res) => {
     }
 
     const successCount = logs.filter((l) => l.status === "ok").length;
+    console.log(`[RUN DONE] jobId=${jobId} stopped=${stoppedByUser} steps=${logs.length}`);
 
     return res.json({
       ok: true,
@@ -692,6 +666,7 @@ app.post("/run", async (req, res) => {
       videoFileName
     });
   } catch (err) {
+    console.error(`[RUN ERROR] jobId=${jobId}`, err);
     return res.status(500).json({
       ok: false,
       jobId,
