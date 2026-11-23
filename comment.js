@@ -1,26 +1,8 @@
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function findCommentInput(page, timeoutMs = 5500) {
-  const start = Date.now();
-  const selector =
-    'textarea, input:not([type="hidden"]):not([type="file"]):not([type="checkbox"]):not([type="radio"]), div[contenteditable="true"], [role="textbox"]';
-
-  while (Date.now() - start < timeoutMs) {
-    const loc = page.locator(selector);
-    const count = await loc.count();
-    for (let i = count - 1; i >= 0; i--) {
-      const item = loc.nth(i);
-      const visible = await item.isVisible().catch(() => false);
-      if (visible) {
-        const box = await item.boundingBox().catch(() => null);
-        if (box && box.width > 40 && box.height > 15 && box.y > 80) {
-          return item;
-        }
-      }
-    }
-    await sleep(300);
-  }
-  return null;
+async function setEditableValue(locator, text) {
+  await locator.click();
+  await locator.fill(text);
 }
 
 async function runComments(page, { message, commentMessage, commentRepeat = 1, maxPosts = 30 }) {
@@ -29,142 +11,63 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
   const repeatPerPost = Math.max(1, Math.min(10, Number(commentRepeat) || 1));
   let sentCount = 0;
 
-  await page.evaluate(() => {
-    const cards = Array.from(
-      document.querySelectorAll('[data-testid*="post"], article, [class*="post-card"], [class*="card"]')
-    );
-    cards.forEach((card, idx) => {
-      if (!card.dataset.samonPostId) {
-        card.dataset.samonPostId = `post-${idx + 1}`;
-      }
-    });
-  });
-
-  const processedPostIds = new Set();
-  let stagnantRounds = 0;
-  let postIndex = 0;
-
-  while (postIndex < maxPosts) {
-    const targetInfo = await page.evaluate((doneIds) => {
-      const doneSet = new Set(doneIds);
-
-      const cards = Array.from(
-        document.querySelectorAll('[data-testid*="post"], article, [class*="post-card"], [class*="card"]')
-      );
-
-      for (let i = 0; i < cards.length; i++) {
-        const card = cards[i];
-        const postId = card.dataset.samonPostId || `card-${i + 1}`;
-        if (doneSet.has(postId)) continue;
-
-        const triggers = Array.from(
-          card.querySelectorAll('button, [role="button"], span, div, input, textarea, a')
-        );
-        for (const el of triggers) {
+  for (let i = 0; i < maxPosts; i++) {
+    const opened = await page.evaluate(() => {
+      const allEls = Array.from(document.querySelectorAll('button, [role="button"], span, div'));
+      for (const el of allEls) {
+        if (el.dataset.samonCommentDone === "1") continue;
+        const t = (el.innerText || "").trim();
+        const a = el.getAttribute("aria-label") || "";
+        if (
+          t.includes("Add comment") ||
+          t.includes("コメントを追加") ||
+          a.toLowerCase().includes("comment")
+        ) {
           const rect = el.getBoundingClientRect();
-          const t = (el.innerText || "").trim();
-          const a = (el.getAttribute("aria-label") || "").toLowerCase();
-          const p = (el.getAttribute("placeholder") || "").toLowerCase();
-          const isMatch =
-            t.includes("コメントを追加") ||
-            t.includes("Add comment") ||
-            a.includes("add comment") ||
-            a.includes("comment") ||
-            p.includes("comment") ||
-            p.includes("コメント");
-
-          if (isMatch && rect.width > 0 && rect.height > 0 && el.children.length <= 4) {
+          if (rect.width > 0 && rect.height > 0 && el.children.length <= 4) {
+            el.dataset.samonCommentDone = "1";
             el.scrollIntoView({ behavior: "instant", block: "center" });
             el.click();
-            return { found: true, postId, label: postId };
+            return true;
           }
         }
       }
+      return false;
+    });
 
-      const allTriggers = Array.from(document.querySelectorAll('button, [role="button"], span, div, a'));
-      for (let i = 0; i < allTriggers.length; i++) {
-        const el = allTriggers[i];
-        if (el.dataset.samonCommented === "1") continue;
-        const rect = el.getBoundingClientRect();
-        const t = (el.innerText || "").trim();
-        const a = (el.getAttribute("aria-label") || "").toLowerCase();
-        const isMatch =
-          t.includes("コメントを追加") ||
-          t.includes("Add comment") ||
-          a.includes("add comment");
-
-        if (isMatch && rect.width > 0 && rect.height > 0 && el.children.length <= 3) {
-          const fallbackId = `trigger-${i + 1}`;
-          if (doneSet.has(fallbackId)) continue;
-          el.dataset.samonCommented = "1";
-          el.scrollIntoView({ behavior: "instant", block: "center" });
-          el.click();
-          return { found: true, postId: fallbackId, label: fallbackId };
-        }
-      }
-
-      return { found: false, postId: null, label: null };
-    }, Array.from(processedPostIds));
-
-    if (!targetInfo.found) {
+    if (!opened) {
       const scrolled = await page.evaluate(() => {
         const before = window.scrollY;
-        window.scrollBy(0, 700);
+        window.scrollBy(0, 600);
         return window.scrollY > before;
       });
-
       if (scrolled) {
-        stagnantRounds = 0;
-        await sleep(1000);
+        await sleep(900);
         continue;
       }
-
-      stagnantRounds++;
-      if (stagnantRounds >= 2) {
-        break;
-      }
-      await sleep(800);
-      continue;
+      break;
     }
 
-    stagnantRounds = 0;
-    processedPostIds.add(targetInfo.postId);
-    postIndex++;
-    await sleep(1000);
+    await sleep(1100);
 
     for (let r = 1; r <= repeatPerPost; r++) {
+      const editor = page.locator('div[contenteditable="true"], textarea, input[type="text"]').last();
+      if ((await editor.count()) === 0) {
+        await page.keyboard.press("Escape").catch(() => {});
+        logs.push({
+          type: "comment",
+          section: `post-${i + 1}`,
+          attempt: r,
+          status: "error",
+          detail: `post-${i + 1} (${r}/${repeatPerPost}回目) - コメント入力欄が見つかりませんでした`,
+          timestamp: new Date().toISOString()
+        });
+        break;
+      }
+
       try {
-        let editor = await findCommentInput(page, 4000);
-
-        if (!editor && r === 1) {
-          await page.evaluate((pid) => {
-            const card = document.querySelector(`[data-samon-post-id="${pid}"]`);
-            if (card) {
-              card.scrollIntoView({ behavior: "instant", block: "center" });
-              card.click();
-            }
-          }, targetInfo.postId);
-          await sleep(1000);
-          editor = await findCommentInput(page, 3500);
-        }
-
-        if (!editor) {
-          await page.keyboard.press("Escape").catch(() => {});
-          logs.push({
-            type: "comment",
-            section: targetInfo.label,
-            attempt: r,
-            status: "error",
-            detail: `${targetInfo.label} (${r}/${repeatPerPost}回目) - コメント入力欄が見つかりませんでした`,
-            timestamp: new Date().toISOString()
-          });
-          break;
-        }
-
-        await editor.scrollIntoViewIfNeeded().catch(() => {});
-        await editor.click();
-        await editor.fill(textToComment);
-        await sleep(450);
+        await setEditableValue(editor, textToComment);
+        await sleep(600);
 
         const sentByButton = await page.evaluate(() => {
           const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
@@ -175,12 +78,10 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
             if (
               rect.width > 0 &&
               rect.height > 0 &&
-              (t === "コメント" ||
-                t === "Comment" ||
-                t === "送信" ||
-                t === "Send" ||
+              (t.includes("コメント") ||
+                t.includes("Comment") ||
+                t.includes("送信") ||
                 a.includes("send") ||
-                a.includes("submit comment") ||
                 a.includes("送信"))
             ) {
               b.click();
@@ -197,27 +98,25 @@ async function runComments(page, { message, commentMessage, commentRepeat = 1, m
         sentCount++;
         logs.push({
           type: "comment",
-          section: targetInfo.label,
+          section: `post-${i + 1}`,
           attempt: r,
           status: "ok",
-          detail: `${targetInfo.label} (${r}/${repeatPerPost}回目) へコメント送信完了`,
+          detail: `post-${i + 1} (${r}/${repeatPerPost}回目) へコメント送信完了`,
           timestamp: new Date().toISOString()
         });
-
-        await sleep(1100);
+        await sleep(1200);
       } catch (err) {
         logs.push({
           type: "comment",
-          section: targetInfo.label,
+          section: `post-${i + 1}`,
           attempt: r,
           status: "error",
-          detail: `${targetInfo.label} (${r}/${repeatPerPost}回目) - ${
+          detail: `post-${i + 1} (${r}/${repeatPerPost}回目) - ${
             err && err.message ? err.message.split("\n")[0] : "コメント送信失敗"
           }`,
           timestamp: new Date().toISOString()
         });
         await page.keyboard.press("Escape").catch(() => {});
-        await sleep(600);
       }
     }
   }
