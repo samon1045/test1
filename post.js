@@ -132,7 +132,7 @@ async function clickSectionAddButton(page, targetIdx) {
         rect.width > 0 &&
         rect.height > 0
       ) {
-        if (count === targetIdx) {
+        if (count === idx) {
           btn.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
           btn.click();
           return true;
