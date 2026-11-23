@@ -101,21 +101,6 @@ function normalizeCookies(rawCookie, targetUrl = "https://padlet.com") {
   return [];
 }
 
-async function downloadGifToTemp(gifUrl) {
-  if (!gifUrl || !/^https?:\/\//i.test(gifUrl.trim())) return null;
-  try {
-    const res = await fetch(gifUrl.trim());
-    if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length === 0) return null;
-    const tmpFile = path.join(os.tmpdir(), `padlet_gif_${Date.now()}.gif`);
-    fs.writeFileSync(tmpFile, buf);
-    return tmpFile;
-  } catch (_) {
-    return null;
-  }
-}
-
 function cleanupDir(dirPath) {
   if (!dirPath || !fs.existsSync(dirPath)) return;
   try {
@@ -196,15 +181,10 @@ app.post("/run", async (req, res) => {
   let browser;
   let context;
   let page;
-  let gifFilePath = null;
   let detectedSections = 0;
   const videoDir = doVideo ? fs.mkdtempSync(path.join(os.tmpdir(), "padlet_rec_")) : null;
 
   try {
-    if (doPost) {
-      gifFilePath = await downloadGifToTemp(gifUrl);
-    }
-
     browser = await chromium.launch({
       headless: true,
       args: [
@@ -244,7 +224,7 @@ app.post("/run", async (req, res) => {
     if (doPost) {
       const postResult = await runPosts(page, {
         message,
-        gifFilePath,
+        gifUrl,
         repeat: count
       });
       detectedSections = postResult.detectedSections;
@@ -259,7 +239,7 @@ app.post("/run", async (req, res) => {
         message,
         commentMessage,
         commentRepeat: cRepeat,
-        maxPosts: 30
+        maxPosts: 25
       });
       logs.push(...commentResult.logs);
     }
@@ -320,11 +300,6 @@ app.post("/run", async (req, res) => {
     });
   } finally {
     if (videoDir) cleanupDir(videoDir);
-    if (gifFilePath && fs.existsSync(gifFilePath)) {
-      try {
-        fs.unlinkSync(gifFilePath);
-      } catch (_) {}
-    }
   }
 });
 
