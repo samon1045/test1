@@ -1,3 +1,4 @@
+```html
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -80,7 +81,7 @@
   </div>
 
   <script>
-    const STORAGE_KEY = "samon_ps_padlet_state_v7";
+    const STORAGE_KEY = "samon_ps_padlet_state_v8";
     const RENDER_BASE_URL = "https://test1-1-qyfl.onrender.com/";
 
     const outputEl = document.getElementById("output");
@@ -369,7 +370,10 @@
             data.videoFileName || `samon_run_${Date.now()}.webm`
           );
         } else if (state.enableVideo) {
-          appendLine("  (録画データは含まれていませんでした)", "gray");
+          appendLine(
+            "  (" + (data.videoSkippedReason || "録画データは含まれていませんでした") + ")",
+            "gray"
+          );
         }
 
         if (!res.ok || !data.ok) {
