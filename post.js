@@ -18,7 +18,7 @@ function resolveLocalGifPath() {
   return null;
 }
 
-async function dismissUploadErrorDialog(page) {
+async function dismissAnyDialog(page) {
   const closed = await page.evaluate(() => {
     const bodyText = document.body ? document.body.innerText || "" : "";
     const hasError =
@@ -26,30 +26,42 @@ async function dismissUploadErrorDialog(page) {
       bodyText.includes("ファイルのアップロード中にエラーが発生しました") ||
       bodyText.includes("写真をアップロードできませんでした");
 
-    if (!hasError) return false;
-
     const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
-    const cancelBtn = btns.find((b) => {
-      const r = b.getBoundingClientRect();
-      const t = (b.innerText || "").trim();
-      return (
-        r.width > 0 &&
-        r.height > 0 &&
-        (t === "キャンセル" || t.includes("キャンセル") || t.toLowerCase().includes("cancel"))
-      );
-    });
 
-    if (cancelBtn) {
-      cancelBtn.click();
-      return true;
+    if (hasError) {
+      const okOrCancel = btns.find((b) => {
+        const r = b.getBoundingClientRect();
+        const t = (b.innerText || "").trim();
+        return (
+          r.width > 0 &&
+          r.height > 0 &&
+          (t === "OK" ||
+            t === "キャンセル" ||
+            t.includes("キャンセル") ||
+            t.toLowerCase() === "ok" ||
+            t.toLowerCase().includes("cancel"))
+        );
+      });
+      if (okOrCancel) {
+        okOrCancel.click();
+        return true;
+      }
     }
+
     return false;
   });
 
   if (closed) {
-    await sleep(700);
+    await sleep(600);
   }
   return closed;
+}
+
+async function closeStrayPickers(page) {
+  // 絵文字ピッカーや検索モーダルが開いていたら閉じる
+  await page.keyboard.press("Escape").catch(() => {});
+  await sleep(250);
+  await dismissAnyDialog(page);
 }
 
 async function detectSections(page) {
@@ -69,7 +81,7 @@ async function detectSections(page) {
           aria.includes("追加") ||
           cls.includes("add")) &&
         rect.y > 0 &&
-        rect.y < 460 &&
+        rect.y < 380 &&
         rect.width > 0 &&
         rect.height > 0
       ) {
@@ -97,7 +109,7 @@ async function clickSectionAddButton(page, targetIdx) {
           aria.includes("追加") ||
           cls.includes("add")) &&
         rect.y > 0 &&
-        rect.y < 460 &&
+        rect.y < 380 &&
         rect.width > 0 &&
         rect.height > 0
       ) {
@@ -113,57 +125,50 @@ async function clickSectionAddButton(page, targetIdx) {
   }, targetIdx);
 }
 
-async function attachLocalGif(page, gifPath) {
+async function attachGifSafely(page, gifPath) {
   if (!gifPath || !fs.existsSync(gifPath)) return;
 
   try {
-    const fileInput = page.locator('input[type="file"]').last();
+    const fileInput = page.locator('input[type="file"]').first();
     if ((await fileInput.count()) > 0) {
-      await fileInput.setInputFiles(gifPath, { timeout: 7000 });
-      await sleep(2400);
-      await dismissUploadErrorDialog(page);
+      await fileInput.setInputFiles(gifPath, { timeout: 6000 });
+      await sleep(1800);
+      await dismissAnyDialog(page);
     }
   } catch (_) {
-    await dismissUploadErrorDialog(page).catch(() => {});
+    await dismissAnyDialog(page).catch(() => {});
   }
 }
 
 async function clickPublishButton(page) {
-  await dismissUploadErrorDialog(page);
+  await dismissAnyDialog(page);
 
   const pubClicked = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-    const candidates = [];
-
     for (const b of buttons) {
       if (b.disabled || b.getAttribute("aria-disabled") === "true") continue;
-      const rect = b.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) continue;
-
       const t = (b.innerText || "").trim();
       const a = (b.getAttribute("aria-label") || "").toLowerCase();
       const testid = (b.getAttribute("data-testid") || "").toLowerCase();
-
-      const isPublishLabel =
-        t === "公開" ||
-        t === "Publish" ||
-        t === "送信" ||
-        t === "Post" ||
-        t.includes("公開") ||
-        t.includes("Publish") ||
-        a.includes("publish") ||
-        a.includes("submit post") ||
-        testid.includes("publish");
-
-      if (isPublishLabel) {
-        candidates.push({ el: b, score: rect.y + (rect.x > window.innerWidth / 2 ? 0 : 1000) });
+      const cls = typeof b.className === "string" ? b.className.toLowerCase() : "";
+      const rect = b.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0 && rect.x > window.innerWidth / 2) {
+        if (
+          t.includes("公開") ||
+          t.includes("Publish") ||
+          t.includes("送信") ||
+          a.includes("publish") ||
+          a.includes("submit") ||
+          a.includes("send") ||
+          testid.includes("publish") ||
+          testid.includes("submit") ||
+          cls.includes("primary") ||
+          cls.includes("submit")
+        ) {
+          b.click();
+          return true;
+        }
       }
-    }
-
-    candidates.sort((a, b) => a.score - b.score);
-    if (candidates.length > 0) {
-      candidates[0].el.click();
-      return true;
     }
     return false;
   });
@@ -173,22 +178,24 @@ async function clickPublishButton(page) {
   }
 
   await sleep(2200);
-  await dismissUploadErrorDialog(page);
+  await dismissAnyDialog(page);
 }
 
 async function createSinglePost(page, { sectionIndex, totalSections, titleMessage, customMessage, gifPath }) {
-  await dismissUploadErrorDialog(page);
+  await closeStrayPickers(page);
 
   let clickedAdd = false;
   if (totalSections > 0) {
     clickedAdd = await clickSectionAddButton(page, sectionIndex);
+  } else {
+    clickedAdd = await clickSectionAddButton(page, 0);
   }
 
   if (!clickedAdd) {
     throw new Error("投稿追加ボタンが見つかりませんでした");
   }
 
-  await sleep(1400);
+  await sleep(1500);
 
   const editables = page.locator(
     'div[contenteditable="true"]:visible, textarea:visible, input[type="text"]:visible'
@@ -203,12 +210,8 @@ async function createSinglePost(page, { sectionIndex, totalSections, titleMessag
     await setEditableValue(editables.nth(1), customMessage);
   }
 
-  await sleep(600);
-
-  if (gifPath) {
-    await attachLocalGif(page, gifPath);
-  }
-
+  await sleep(700);
+  await attachGifSafely(page, gifPath);
   await clickPublishButton(page);
 }
 
@@ -219,9 +222,9 @@ async function runPosts(page, { message, repeat }) {
   const gifPath = resolveLocalGifPath();
   const textVal = message || "test";
 
-  for (let secIdx = 0; secIdx < loopSections; secIdx++) {
-    const sectionName = `Section ${secIdx + 1}`;
-    for (let i = 1; i <= repeat; i++) {
+  for (let i = 1; i <= repeat; i++) {
+    for (let secIdx = 0; secIdx < loopSections; secIdx++) {
+      const sectionName = `Section ${secIdx + 1}`;
       try {
         await createSinglePost(page, {
           sectionIndex: secIdx,
@@ -239,7 +242,7 @@ async function runPosts(page, { message, repeat }) {
           timestamp: new Date().toISOString()
         });
       } catch (err) {
-        await dismissUploadErrorDialog(page).catch(() => {});
+        await closeStrayPickers(page).catch(() => {});
         logs.push({
           type: "post",
           section: sectionName,
@@ -249,7 +252,13 @@ async function runPosts(page, { message, repeat }) {
           timestamp: new Date().toISOString()
         });
       }
-      await sleep(800);
+      await sleep(900);
+    }
+
+    // 次の周回へ行く前に一度リロードして画面状態をリセット（参考コードのラウンド方式）
+    if (i < repeat) {
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+      await sleep(3500);
     }
   }
 
