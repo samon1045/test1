@@ -11,6 +11,7 @@ const { sleep, cleanupDir, cleanupFile } = require("./utils");
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const MAX_VIDEO_BYTES = 35 * 1024 * 1024;
+const MAX_JOB_DURATION_MS = 150000; // Renderの接続断(約180-300秒)前に必ずJSONを返す上限
 
 const activeJobs = new Map();
 
@@ -284,9 +285,7 @@ async function inspectSections(page) {
           seen.add(t);
           sections.push({
             title: t,
-            centerX: r.left + r.width / 2,
-            left: r.left,
-            right: r.right
+            centerX: r.left + r.width / 2
           });
         }
       }
@@ -299,12 +298,100 @@ async function inspectSections(page) {
   );
 }
 
-async function clickAddButtonForSection(page, secIdx, sectionObj) {
-  const targetCenterX =
-    sectionObj && typeof sectionObj.centerX === "number" ? sectionObj.centerX : null;
+async function selectSectionInOpenComposer(page, sectionTitle) {
+  if (!sectionTitle) return false;
 
+  // 1. フォーム内のセクション選択トリガー（現在選択中のセクション名や「セクション」ボタン）を開く
+  const openedTrigger = await withTimeout(
+    page.evaluate(() => {
+      const candidates = Array.from(
+        document.querySelectorAll(
+          '[role="dialog"] button, [role="dialog"] [role="button"], form button, form [role="button"], [class*="composer"] button, [class*="Composer"] button, [class*="modal"] button, [class*="Modal"] button'
+        )
+      );
+
+      for (const btn of candidates) {
+        const r = btn.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        const t = (btn.innerText || "").trim();
+        const a = (btn.getAttribute("aria-label") || "").toLowerCase();
+        if (
+          /^セクション\s*\d+$/i.test(t) ||
+          a.includes("section") ||
+          a.includes("セクション")
+        ) {
+          btn.click();
+          return true;
+        }
+      }
+      return false;
+    }),
+    2000,
+    false
+  );
+
+  if (openedTrigger) {
+    await sleep(450);
+  }
+
+  // 2. ドロップダウンやメニュー内の対象セクション名をクリック
   return withTimeout(
-    page.evaluate(({ idx, centerX }) => {
+    page.evaluate((targetTitle) => {
+      const normalize = (s) => String(s || "").replace(/\s+/g, "").trim();
+      const wanted = normalize(targetTitle);
+
+      const items = Array.from(
+        document.querySelectorAll('[role="option"], [role="menuitem"], li, button, [role="button"], div, span')
+      );
+
+      for (const el of items) {
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        // ボード上部の見出しそのもの（y < 180 でメニュー外）は除外
+        if (r.y < 140 && !el.closest('[role="listbox"], [role="menu"], [role="dialog"], [class*="popover"], [class*="Popover"], [class*="dropdown"], [class*="Dropdown"]')) {
+          continue;
+        }
+        const t = normalize(el.innerText);
+        if (t === wanted) {
+          const clickable = el.closest('[role="option"], [role="menuitem"], li, button, [role="button"]') || el;
+          clickable.click();
+          return true;
+        }
+      }
+      return false;
+    }, sectionTitle),
+    2000,
+    false
+  );
+}
+
+async function clickAddButtonForSection(page, secIdx, sectionObj) {
+  const sectionTitle = sectionObj && sectionObj.title ? sectionObj.title : `セクション${secIdx + 1}`;
+
+  // まず対象セクション見出しを画面内にスクロールして最新の座標を取る
+  const clickInfo = await withTimeout(
+    page.evaluate((targetTitle) => {
+      const normalize = (s) => String(s || "").replace(/\s+/g, "").trim();
+      const wanted = normalize(targetTitle);
+
+      const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, div, span, p"));
+      let headingEl = null;
+      for (const el of headings) {
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0 || r.y < 0 || r.y > 500) continue;
+        if (normalize(el.innerText) === wanted) {
+          headingEl = el;
+          break;
+        }
+      }
+
+      if (headingEl) {
+        headingEl.scrollIntoView({ behavior: "instant", block: "nearest", inline: "center" });
+      }
+
+      const hRect = headingEl ? headingEl.getBoundingClientRect() : null;
+      const centerX = hRect ? hRect.left + hRect.width / 2 : null;
+
       const allBtns = Array.from(
         document.querySelectorAll('button, [role="button"], [data-testid*="add"]')
       );
@@ -324,8 +411,14 @@ async function clickAddButtonForSection(page, secIdx, sectionObj) {
         );
       };
 
-      const isPostAddLike = (btn) => {
-        if (isSectionCreate(btn)) return false;
+      const isFloatingBottomPostBtn = (btn) => {
+        const r = btn.getBoundingClientRect();
+        const t = (btn.innerText || "").trim();
+        return r.y > window.innerHeight - 130 && (t.includes("投稿") || t === "+");
+      };
+
+      const isColumnAddBtn = (btn) => {
+        if (isSectionCreate(btn) || isFloatingBottomPostBtn(btn)) return false;
         const r = btn.getBoundingClientRect();
         if (r.width <= 0 || r.height <= 0) return false;
         const t = (btn.innerText || "").trim();
@@ -333,25 +426,22 @@ async function clickAddButtonForSection(page, secIdx, sectionObj) {
         const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
         return (
           t === "+" ||
-          t.includes("投稿") ||
           t.includes("Add") ||
           t.includes("追加") ||
           a.includes("add") ||
-          a.includes("post") ||
           a.includes("追加") ||
-          a.includes("投稿") ||
-          testid.includes("add") ||
-          testid.includes("post")
+          testid.includes("add")
         );
       };
 
+      // 1. セクション列内の「+ / 追加」ボタン（右下フローティングボタンを除外）
       if (centerX !== null) {
-        const columnPlusBtns = allBtns
+        const columnBtns = allBtns
           .filter((btn) => {
-            if (!isPostAddLike(btn)) return false;
+            if (!isColumnAddBtn(btn)) return false;
             const r = btn.getBoundingClientRect();
             const bx = r.left + r.width / 2;
-            return Math.abs(bx - centerX) < 220 && r.y > 40 && r.y < window.innerHeight - 60;
+            return Math.abs(bx - centerX) < 180 && r.y > 40 && r.y < window.innerHeight - 130;
           })
           .sort((a, b) => {
             const ra = a.getBoundingClientRect();
@@ -362,27 +452,44 @@ async function clickAddButtonForSection(page, secIdx, sectionObj) {
             );
           });
 
-        if (columnPlusBtns.length > 0) {
-          const target = columnPlusBtns[0];
+        if (columnBtns.length > 0) {
+          const target = columnBtns[0];
           target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
           target.click();
-          return true;
+          return { clicked: true, viaFloating: false };
         }
       }
 
-      const generalBtns = allBtns.filter((btn) => isPostAddLike(btn));
-      if (generalBtns.length === 0) {
-        return false;
+      // 2. 列内ボタンがない場合は右下の「+ 投稿」フローティングボタンを使う
+      const floatingBtn = allBtns.find((btn) => {
+        if (isSectionCreate(btn)) return false;
+        const r = btn.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        const t = (btn.innerText || "").trim();
+        const a = (btn.getAttribute("aria-label") || "").toLowerCase();
+        return t.includes("投稿") || t === "+" || a.includes("add") || a.includes("post");
+      });
+
+      if (floatingBtn) {
+        floatingBtn.click();
+        return { clicked: true, viaFloating: true };
       }
 
-      const target = generalBtns.length > 1 && generalBtns[idx] ? generalBtns[idx] : generalBtns[0];
-      target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
-      target.click();
-      return true;
-    }, { idx: secIdx, centerX: targetCenterX }),
-    2500,
-    false
+      return { clicked: false, viaFloating: false };
+    }, sectionTitle),
+    3000,
+    { clicked: false, viaFloating: false }
   );
+
+  if (!clickInfo || !clickInfo.clicked) return false;
+
+  // 右下の「+ 投稿」から開いた場合はフォーム内のセクション選択を切り替える
+  if (clickInfo.viaFloating) {
+    await sleep(600);
+    await selectSectionInOpenComposer(page, sectionTitle);
+  }
+
+  return true;
 }
 
 async function clickPublishAndVerify(page) {
@@ -528,7 +635,10 @@ app.post("/run", async (req, res) => {
   const jobId = String(reqJobId || "").trim() || crypto.randomUUID();
   const jobState = { stopped: false };
   activeJobs.set(jobId, jobState);
-  const shouldStop = () => Boolean(jobState.stopped);
+
+  const jobStartTime = Date.now();
+  const isTimedOut = () => Date.now() - jobStartTime > MAX_JOB_DURATION_MS;
+  const shouldStop = () => Boolean(jobState.stopped) || isTimedOut();
 
   const totalRounds = Math.max(1, Math.min(10, Number(repeat) || 2));
   const cRepeat = Math.max(1, Math.min(10, Number(commentRepeat) || 1));
@@ -717,7 +827,7 @@ app.post("/run", async (req, res) => {
                 timestamp: new Date().toISOString()
               });
 
-              if (await sleepWithStop(2000, shouldStop)) {
+              if (await sleepWithStop(1800, shouldStop)) {
                 stoppedByUser = true;
                 break;
               }
@@ -773,7 +883,7 @@ app.post("/run", async (req, res) => {
 
               if (!opened) break;
 
-              if (await sleepWithStop(900, shouldStop)) {
+              if (await sleepWithStop(800, shouldStop)) {
                 stoppedByUser = true;
                 break;
               }
@@ -834,7 +944,7 @@ app.post("/run", async (req, res) => {
                   timestamp: new Date().toISOString()
                 });
 
-                if (await sleepWithStop(1200, shouldStop)) {
+                if (await sleepWithStop(1000, shouldStop)) {
                   stoppedByUser = true;
                   break;
                 }
@@ -901,12 +1011,15 @@ app.post("/run", async (req, res) => {
     }
 
     const successCount = logs.filter((l) => l.status === "ok").length;
-    console.log(`[RUN DONE] jobId=${jobId} stopped=${stoppedByUser} steps=${logs.length}`);
+    console.log(
+      `[RUN DONE] jobId=${jobId} stopped=${stoppedByUser} timedOut=${isTimedOut()} steps=${logs.length}`
+    );
 
     return res.json({
       ok: true,
       jobId,
-      stopped: stoppedByUser,
+      stopped: jobState.stopped,
+      timedOut: isTimedOut(),
       enablePost: doPost,
       enableComment: doComment,
       enableVideo: doVideo,
@@ -924,7 +1037,7 @@ app.post("/run", async (req, res) => {
     return res.status(500).json({
       ok: false,
       jobId,
-      stopped: stoppedByUser,
+      stopped: jobState.stopped,
       error: err && err.message ? err.message : "Playwright実行中にエラーが発生しました。",
       logs
     });
