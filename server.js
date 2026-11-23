@@ -10,7 +10,8 @@ const { runComments } = require("./comment");
 const { sleep, cleanupDir } = require("./utils");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const MAX_VIDEO_BYTES = 80 * 1024 * 1024; // 80MBまでBase64返却を許容
 
 app.use(
   cors({
@@ -19,7 +20,6 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization"]
   })
 );
-app.options("*", cors());
 app.use(express.json({ limit: "2mb" }));
 
 function normalizeCookies(rawCookie, targetUrl = "https://padlet.com") {
@@ -156,6 +156,16 @@ app.post("/run", async (req, res) => {
     return res.status(400).json({ ok: false, error: "roomUrl が指定されていません。" });
   }
 
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(trimmedUrl);
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+      throw new Error("Invalid protocol");
+    }
+  } catch (_) {
+    return res.status(400).json({ ok: false, error: "有効な http/https の roomUrl を指定してください。" });
+  }
+
   const doPost = Boolean(enablePost);
   const doComment = Boolean(enableComment);
   const doVideo = Boolean(enableVideo);
@@ -170,9 +180,9 @@ app.post("/run", async (req, res) => {
   const count = Math.max(1, Math.min(10, Number(repeat) || 2));
   const cRepeat = Math.max(1, Math.min(10, Number(commentRepeat) || 1));
   const logs = [];
-  let browser;
-  let context;
-  let page;
+  let browser = null;
+  let context = null;
+  let page = null;
   let detectedSections = 0;
   const videoDir = doVideo ? fs.mkdtempSync(path.join(os.tmpdir(), "padlet_rec_")) : null;
 
@@ -207,20 +217,21 @@ app.post("/run", async (req, res) => {
 
     context = await browser.newContext(contextOptions);
 
-    const cookies = normalizeCookies(cookie, trimmedUrl);
+    const cookies = normalizeCookies(cookie, parsedUrl.toString());
     if (cookies.length > 0) {
       await context.addCookies(cookies);
     }
 
     page = await context.newPage();
-    await page.goto(trimmedUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.goto(parsedUrl.toString(), { waitUntil: "domcontentloaded", timeout: 60000 });
     await waitForBoardReady(page, 25000);
 
     if (doPost) {
       const postResult = await runPosts(page, {
         message,
         gifUrl,
-        repeat: count
+        repeat: count,
+        waitForBoardReady
       });
       detectedSections = postResult.detectedSections;
       logs.push(...postResult.logs);
@@ -239,27 +250,35 @@ app.post("/run", async (req, res) => {
       logs.push(...commentResult.logs);
     }
 
-    const videoObj = doVideo ? page.video() : null;
-    await page.close();
-    await context.close();
-    context = null;
+    const videoObj = doVideo && page ? page.video() : null;
+    if (context) {
+      await context.close();
+      context = null;
+      page = null;
+    }
 
     let videoBase64 = null;
     let videoFileName = null;
+    let videoSkippedReason = null;
+
     if (videoObj) {
       const savedPath = await videoObj.path().catch(() => null);
       if (savedPath && fs.existsSync(savedPath)) {
         const stat = fs.statSync(savedPath);
-        if (stat.size > 0 && stat.size <= 50 * 1024 * 1024) {
+        if (stat.size > 0 && stat.size <= MAX_VIDEO_BYTES) {
           const buf = fs.readFileSync(savedPath);
           videoBase64 = buf.toString("base64");
           videoFileName = `samon_run_${Date.now()}.webm`;
+        } else if (stat.size > MAX_VIDEO_BYTES) {
+          videoSkippedReason = `録画サイズが上限（${Math.round(MAX_VIDEO_BYTES / (1024 * 1024))}MB）を超過しました`;
         }
       }
     }
 
-    await browser.close();
-    browser = null;
+    if (browser) {
+      await browser.close();
+      browser = null;
+    }
 
     const successCount = logs.filter((l) => l.status === "ok").length;
 
@@ -275,26 +294,25 @@ app.post("/run", async (req, res) => {
       logs,
       videoBase64,
       videoMimeType: videoBase64 ? "video/webm" : null,
-      videoFileName
+      videoFileName,
+      videoSkippedReason
     });
   } catch (err) {
-    if (context) {
-      try {
-        await context.close();
-      } catch (_) {}
-    }
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (_) {}
-    }
     return res.status(500).json({
       ok: false,
       error: err && err.message ? err.message : "Playwright実行中にエラーが発生しました。",
       logs
     });
   } finally {
-    if (videoDir) cleanupDir(videoDir);
+    if (context) {
+      await context.close().catch(() => {});
+    }
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+    if (videoDir) {
+      cleanupDir(videoDir);
+    }
   }
 });
 
