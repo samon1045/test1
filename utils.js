@@ -4,7 +4,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function setEditableValue(locator, text) {
   await locator.scrollIntoViewIfNeeded().catch(() => {});
-  await locator.click({ timeout: 4000 });
+  await locator.click({ timeout: 5000 });
 
   const tagName = await locator
     .evaluate((el) => (el.tagName || "").toLowerCase())
@@ -12,7 +12,9 @@ async function setEditableValue(locator, text) {
 
   if (tagName === "textarea" || tagName === "input") {
     await locator.fill("");
-    await locator.fill(text);
+    if (text) {
+      await locator.fill(text);
+    }
     return;
   }
 
