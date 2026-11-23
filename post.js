@@ -4,8 +4,8 @@ const { sleep, setEditableValue } = require("./utils");
 
 function resolveLocalGifPath() {
   const candidates = [
-    path.join(__dirname, "_______ (3).gif"),
     path.join(__dirname, "_______.gif"),
+    path.join(__dirname, "_______ (3).gif"),
     path.join(__dirname, "image.gif")
   ];
 
@@ -26,28 +26,27 @@ async function dismissAnyDialog(page) {
       bodyText.includes("ファイルのアップロード中にエラーが発生しました") ||
       bodyText.includes("写真をアップロードできませんでした");
 
+    if (!hasError) return false;
+
     const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+    const okOrCancel = btns.find((b) => {
+      const r = b.getBoundingClientRect();
+      const t = (b.innerText || "").trim();
+      return (
+        r.width > 0 &&
+        r.height > 0 &&
+        (t === "OK" ||
+          t === "キャンセル" ||
+          t.includes("キャンセル") ||
+          t.toLowerCase() === "ok" ||
+          t.toLowerCase().includes("cancel"))
+      );
+    });
 
-    if (hasError) {
-      const okOrCancel = btns.find((b) => {
-        const r = b.getBoundingClientRect();
-        const t = (b.innerText || "").trim();
-        return (
-          r.width > 0 &&
-          r.height > 0 &&
-          (t === "OK" ||
-            t === "キャンセル" ||
-            t.includes("キャンセル") ||
-            t.toLowerCase() === "ok" ||
-            t.toLowerCase().includes("cancel"))
-        );
-      });
-      if (okOrCancel) {
-        okOrCancel.click();
-        return true;
-      }
+    if (okOrCancel) {
+      okOrCancel.click();
+      return true;
     }
-
     return false;
   });
 
@@ -55,37 +54,6 @@ async function dismissAnyDialog(page) {
     await sleep(600);
   }
   return closed;
-}
-
-async function closeStrayPickers(page) {
-  await page.keyboard.press("Escape").catch(() => {});
-  await sleep(250);
-  await dismissAnyDialog(page);
-}
-
-function getAddButtonsInDocument() {
-  const addBtns = Array.from(
-    document.querySelectorAll('button, [role="button"], [data-testid*="add"]')
-  );
-  return addBtns.filter((btn) => {
-    const rect = btn.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return false;
-    if (rect.y < 0 || rect.y > window.innerHeight * 0.75) return false;
-
-    const text = (btn.innerText || "").trim();
-    const aria = (btn.getAttribute("aria-label") || "").toLowerCase();
-    const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
-    const cls = typeof btn.className === "string" ? btn.className.toLowerCase() : "";
-
-    return (
-      text === "+" ||
-      aria.includes("add") ||
-      aria.includes("追加") ||
-      testid.includes("add") ||
-      cls.includes("add-post") ||
-      cls.includes("add_post")
-    );
-  });
 }
 
 async function detectSections(page) {
@@ -96,21 +64,14 @@ async function detectSections(page) {
     let count = 0;
     for (const btn of addBtns) {
       const rect = btn.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) continue;
-      if (rect.y < 0 || rect.y > window.innerHeight * 0.75) continue;
-
       const text = (btn.innerText || "").trim();
-      const aria = (btn.getAttribute("aria-label") || "").toLowerCase();
-      const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
-      const cls = typeof btn.className === "string" ? btn.className.toLowerCase() : "";
-
+      const aria = btn.getAttribute("aria-label") || "";
+      const cls = typeof btn.className === "string" ? btn.className : "";
       if (
-        text === "+" ||
-        aria.includes("add") ||
-        aria.includes("追加") ||
-        testid.includes("add") ||
-        cls.includes("add-post") ||
-        cls.includes("add_post")
+        (text === "+" || aria.includes("Add") || aria.includes("追加") || cls.includes("add")) &&
+        rect.y > 0 &&
+        rect.y < 350 &&
+        rect.width > 0
       ) {
         count++;
       }
@@ -121,66 +82,77 @@ async function detectSections(page) {
 
 async function clickSectionAddButton(page, targetIdx) {
   return page.evaluate((idx) => {
-    const all = Array.from(
+    const addBtns = Array.from(
       document.querySelectorAll('button, [role="button"], [data-testid*="add"]')
     );
-    const matched = all.filter((btn) => {
+    let count = 0;
+    for (const btn of addBtns) {
       const rect = btn.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return false;
-      if (rect.y < 0 || rect.y > window.innerHeight * 0.75) return false;
-
       const text = (btn.innerText || "").trim();
-      const aria = (btn.getAttribute("aria-label") || "").toLowerCase();
-      const testid = (btn.getAttribute("data-testid") || "").toLowerCase();
-      const cls = typeof btn.className === "string" ? btn.className.toLowerCase() : "";
-
-      return (
-        text === "+" ||
-        aria.includes("add") ||
-        aria.includes("追加") ||
-        testid.includes("add") ||
-        cls.includes("add-post") ||
-        cls.includes("add_post")
-      );
-    });
-
-    const target = matched[idx] || matched[0];
-    if (!target) return false;
-
-    target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
-    target.click();
-    return true;
+      const aria = btn.getAttribute("aria-label") || "";
+      const cls = typeof btn.className === "string" ? btn.className : "";
+      if (
+        (text === "+" || aria.includes("Add") || aria.includes("追加") || cls.includes("add")) &&
+        rect.y > 0 &&
+        rect.y < 350 &&
+        rect.width > 0
+      ) {
+        if (count === idx) {
+          btn.click();
+          return true;
+        }
+        count++;
+      }
+    }
+    return false;
   }, targetIdx);
 }
 
-async function attachGifSafely(page, gifPath) {
-  if (!gifPath || !fs.existsSync(gifPath)) return;
-
-  try {
-    const fileInput = page.locator('input[type="file"]').first();
-    if ((await fileInput.count()) > 0) {
-      await fileInput.setInputFiles(gifPath, { timeout: 6000 });
-      await sleep(1800);
-      await dismissAnyDialog(page);
-    }
-  } catch (_) {
-    await dismissAnyDialog(page).catch(() => {});
+async function createSinglePost(page, { secIdx, titleMessage, customMessage, imagePath }) {
+  const clickedAdd = await clickSectionAddButton(page, secIdx);
+  if (!clickedAdd) {
+    throw new Error(`セクション ${secIdx + 1} の追加ボタンが見つかりませんでした`);
   }
-}
 
-async function clickPublishButton(page) {
-  await dismissAnyDialog(page);
+  await sleep(1500);
+
+  const editables = page.locator('div[contenteditable="true"], textarea, input[type="text"]');
+  const editableCount = await editables.count();
+  if (editableCount === 0) {
+    throw new Error("投稿入力欄が見つかりませんでした");
+  }
+
+  if (editableCount > 0) {
+    await setEditableValue(editables.nth(0), titleMessage);
+  }
+  if (editableCount > 1) {
+    await setEditableValue(editables.nth(1), customMessage);
+  }
+
+  await sleep(800);
+
+  if (imagePath && fs.existsSync(imagePath)) {
+    try {
+      const fileInput = page.locator('input[type="file"]').first();
+      if ((await fileInput.count()) > 0) {
+        await fileInput.setInputFiles(imagePath);
+        await sleep(2000);
+        await dismissAnyDialog(page);
+      }
+    } catch (_) {
+      await dismissAnyDialog(page).catch(() => {});
+    }
+  }
 
   const pubClicked = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
     for (const b of buttons) {
-      if (b.disabled || b.getAttribute("aria-disabled") === "true") continue;
       const t = (b.innerText || "").trim();
       const a = (b.getAttribute("aria-label") || "").toLowerCase();
       const testid = (b.getAttribute("data-testid") || "").toLowerCase();
+      const cls = typeof b.className === "string" ? b.className : "";
       const rect = b.getBoundingClientRect();
-
-      if (rect.width > 0 && rect.height > 0) {
+      if (rect.width > 0 && rect.height > 0 && rect.x > window.innerWidth / 2) {
         if (
           t.includes("公開") ||
           t.includes("Publish") ||
@@ -189,9 +161,10 @@ async function clickPublishButton(page) {
           a.includes("submit") ||
           a.includes("send") ||
           testid.includes("publish") ||
-          testid.includes("submit")
+          testid.includes("submit") ||
+          cls.includes("primary") ||
+          cls.includes("submit")
         ) {
-          b.scrollIntoView({ behavior: "instant", block: "center" });
           b.click();
           return true;
         }
@@ -204,97 +177,66 @@ async function clickPublishButton(page) {
     await page.keyboard.press("Control+Enter").catch(() => {});
   }
 
-  await sleep(2200);
+  await sleep(3500);
   await dismissAnyDialog(page);
 }
 
-async function createSinglePost(page, { sectionIndex, totalSections, titleMessage, customMessage, gifPath }) {
-  await closeStrayPickers(page);
-
-  const idxToClick = totalSections > 0 ? sectionIndex : 0;
-  const clickedAdd = await clickSectionAddButton(page, idxToClick);
-
-  if (!clickedAdd) {
-    throw new Error("投稿追加ボタンが見つかりませんでした");
-  }
-
-  await sleep(1500);
-
-  const editables = page.locator(
-    'div[contenteditable="true"]:visible, textarea:visible, input[type="text"]:visible'
-  );
-  const editableCount = await editables.count();
-  if (editableCount === 0) {
-    throw new Error("投稿入力欄が見つかりませんでした");
-  }
-
-  await setEditableValue(editables.nth(0), titleMessage);
-  if (editableCount > 1) {
-    await setEditableValue(editables.nth(1), customMessage);
-  }
-
-  await sleep(700);
-  await attachGifSafely(page, gifPath);
-  await clickPublishButton(page);
-}
-
-async function runPosts(page, { message, repeat, waitForBoardReady }) {
+async function runPosts(page, { message, repeat = 2 }) {
   const logs = [];
-  const detectedSections = await detectSections(page);
-  const loopSections = Math.max(detectedSections, 1);
-  const gifPath = resolveLocalGifPath();
-  const textVal = message || "test";
+  const totalRounds = Math.max(Number(repeat) || 1, 1);
+  const titleMessage = message || "お知らせ";
+  const customMessage = message || "メッセージ";
+  const imagePath = resolveLocalGifPath();
+  let lastDetectedSections = 1;
 
-  for (let i = 1; i <= repeat; i++) {
-    for (let secIdx = 0; secIdx < loopSections; secIdx++) {
+  for (let roundNum = 1; roundNum <= totalRounds; roundNum++) {
+    const totalSections = await detectSections(page);
+    const loopCount = Math.max(totalSections, 1);
+    lastDetectedSections = loopCount;
+
+    for (let secIdx = 0; secIdx < loopCount; secIdx++) {
       const sectionName = `Section ${secIdx + 1}`;
       try {
         await createSinglePost(page, {
-          sectionIndex: secIdx,
-          totalSections: detectedSections,
-          titleMessage: textVal,
-          customMessage: textVal,
-          gifPath
+          secIdx,
+          titleMessage,
+          customMessage,
+          imagePath
         });
         logs.push({
           type: "post",
           section: sectionName,
-          attempt: i,
+          attempt: roundNum,
           status: "ok",
-          detail: "投稿完了",
+          detail: "投稿送信完了",
           timestamp: new Date().toISOString()
         });
       } catch (err) {
-        await closeStrayPickers(page).catch(() => {});
+        await page.keyboard.press("Escape").catch(() => {});
+        await dismissAnyDialog(page).catch(() => {});
         logs.push({
           type: "post",
           section: sectionName,
-          attempt: i,
+          attempt: roundNum,
           status: "error",
           detail: err && err.message ? err.message.split("\n")[0] : "投稿処理失敗",
           timestamp: new Date().toISOString()
         });
       }
-      await sleep(900);
     }
 
-    if (i < repeat) {
+    if (roundNum < totalRounds) {
       await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
-      if (typeof waitForBoardReady === "function") {
-        await waitForBoardReady(page, 25000).catch(() => {});
-      } else {
-        await sleep(3500);
-      }
+      await sleep(5000);
     }
   }
 
   return {
-    detectedSections: loopSections,
+    detectedSections: lastDetectedSections,
     logs
   };
 }
 
 module.exports = {
-  runPosts,
-  getAddButtonsInDocument
+  runPosts
 };
