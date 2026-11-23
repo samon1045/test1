@@ -1,6 +1,6 @@
 {
-  "name": "samon-padlet-playwright",
-  "version": "1.0.0",
+  "name": "Sybliva-Tools",
+  "version": "1.0.1",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
