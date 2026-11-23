@@ -2,18 +2,15 @@ const fs = require("fs");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// 各セクションの「+」ボタンを座標（左→右）順に取得して数を返す
 async function detectSections(page) {
   return page.evaluate(() => {
     const addButtons = Array.from(document.querySelectorAll('button, [role="button"]')).filter((el) => {
       const rect = el.getBoundingClientRect();
       const text = (el.innerText || "").trim();
       const aria = (el.getAttribute("aria-label") || "").toLowerCase();
-      // 右下の「+ 投稿」FABは除外
       const isRightBottomFab = rect.x > window.innerWidth * 0.82 && rect.y > window.innerHeight * 0.78;
       if (isRightBottomFab || rect.width <= 0 || rect.height <= 0) return false;
-      // セクションヘッダー直下の横長「+」ボタン（Y座標 120〜420px付近）
-      if (rect.y < 100 || rect.y > 450) return false;
+      if (rect.y < 100 || rect.y > 480) return false;
       return (
         text === "+" ||
         aria.includes("add post") ||
@@ -21,7 +18,6 @@ async function detectSections(page) {
       );
     });
 
-    // 左から右へソート
     addButtons.sort((a, b) => a.getBoundingClientRect().x - b.getBoundingClientRect().x);
     return addButtons.length;
   });
@@ -35,7 +31,7 @@ async function clickSectionAddButton(page, targetIdx) {
       const aria = (el.getAttribute("aria-label") || "").toLowerCase();
       const isRightBottomFab = rect.x > window.innerWidth * 0.82 && rect.y > window.innerHeight * 0.78;
       if (isRightBottomFab || rect.width <= 0 || rect.height <= 0) return false;
-      if (rect.y < 100 || rect.y > 450) return false;
+      if (rect.y < 100 || rect.y > 480) return false;
       return (
         text === "+" ||
         aria.includes("add post") ||
@@ -55,7 +51,19 @@ async function clickSectionAddButton(page, targetIdx) {
   }, targetIdx);
 }
 
-// GIFファイルをペースト（ClipboardEvent）＋ file input の両方で添付
+async function waitForPostInputs(page, timeoutMs = 5000) {
+  const start = Date.now();
+  const locator = page.locator('div[contenteditable="true"], textarea, input[type="text"], [role="textbox"]');
+  while (Date.now() - start < timeoutMs) {
+    const count = await locator.count();
+    if (count > 0) {
+      return locator;
+    }
+    await sleep(250);
+  }
+  return null;
+}
+
 async function attachGifToComposer(page, gifFilePath) {
   if (!gifFilePath || !fs.existsSync(gifFilePath)) return false;
 
@@ -103,7 +111,6 @@ async function attachGifToComposer(page, gifFilePath) {
   await page.keyboard.up("Control");
   await sleep(1200);
 
-  // hidden の input[type="file"] にも直接セットして確実にアップロードさせる
   const fileInputs = page.locator('input[type="file"]');
   const fileInputCount = await fileInputs.count();
   if (fileInputCount > 0) {
@@ -142,10 +149,8 @@ async function clickPublishAndEnsureClosed(page) {
     await page.keyboard.press("Control+Enter");
   }
 
-  // 投稿送信＆カードが閉じるまで少し待つ
-  await sleep(2500);
+  await sleep(2200);
 
-  // 万が一カードが残っていたら「×」で閉じる
   await page.evaluate(() => {
     const closeBtns = Array.from(document.querySelectorAll('button, [role="button"]')).filter((el) => {
       const r = el.getBoundingClientRect();
@@ -164,7 +169,7 @@ async function clickPublishAndEnsureClosed(page) {
     }
   });
 
-  await sleep(700);
+  await sleep(600);
 }
 
 async function createSinglePost(page, { sectionIndex, totalSections, message, gifFilePath }) {
@@ -174,7 +179,6 @@ async function createSinglePost(page, { sectionIndex, totalSections, message, gi
   }
 
   if (!clickedAdd) {
-    // フォールバック：右下の「+ 投稿」ボタン
     clickedAdd = await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
       for (const b of btns) {
@@ -198,22 +202,25 @@ async function createSinglePost(page, { sectionIndex, totalSections, message, gi
     throw new Error("投稿追加ボタンが見つかりませんでした");
   }
 
-  await sleep(1400);
+  let editables = await waitForPostInputs(page, 5000);
 
-  // 開いた投稿カード内の入力欄を取得
-  const editables = page.locator('div[contenteditable="true"], textarea, input[type="text"]');
-  const editableCount = await editables.count();
-  if (editableCount === 0) {
+  // Section 1 などで開かない場合、一度再クリックを試す
+  if (!editables && totalSections > 0) {
+    await clickSectionAddButton(page, sectionIndex);
+    editables = await waitForPostInputs(page, 3500);
+  }
+
+  if (!editables) {
     throw new Error("投稿入力欄が見つかりませんでした");
   }
 
+  const editableCount = await editables.count();
   const textToType = message || "test";
   if (editableCount === 1) {
     const target = editables.first();
     await target.click();
     await target.fill(textToType);
   } else {
-    // 1つ目（件名）と最後の入力欄（本文）に入力
     await editables.nth(0).click();
     await editables.nth(0).fill(textToType);
     await sleep(250);
@@ -263,7 +270,7 @@ async function runPosts(page, { message, gifFilePath, repeat }) {
           timestamp: new Date().toISOString()
         });
       }
-      await sleep(800);
+      await sleep(700);
     }
   }
 
